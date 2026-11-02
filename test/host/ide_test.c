@@ -28,10 +28,22 @@ extern unsigned long	ide_intr_count, ide_intr_spurious, ide_intr_timeouts, ide_t
 extern unsigned long	ide_dup_submits, ide_resets, ide_pagecross_n, ide_intr_busy;
 extern int	ide_slave_enable, ide_debug, ide_master_unit, ide_slave_unit;
 extern int	ide_intr_enable, ide_board_force;
-extern unsigned long	ide_spins_hw, ide_atapi_cmds, ide_atapi_overrun, ide_spins_atapi, ide_atapi_irlate;
+extern unsigned long	ide_atapi_cmds, ide_atapi_overrun, ide_spins_atapi, ide_atapi_irlate;
 #if IDE_CACHE
-extern long	ide_cache;
-extern unsigned long	ide_push_n, ide_ci_ok;
+extern unsigned long	ide_ci_ok;
+#endif
+
+/* the investigation-only symbols: defined only in an IDE_DIAG build; a default
+ * build must not have them, which the weak references let the harness check */
+#if IDE_DIAG
+#define DIAG_SYM
+#else
+#define DIAG_SYM	__attribute__((weak))
+#endif
+extern unsigned long	ide_spins_hw DIAG_SYM;
+#if IDE_CACHE
+extern long		ide_cache DIAG_SYM;
+extern unsigned long	ide_push_n DIAG_SYM, ide_push_bytes DIAG_SYM;
 #endif
 
 /* page size the driver was built for (the 68040/68060 line uses 4096) */
@@ -1245,6 +1257,7 @@ test_intr_not_mine()
 	CHECK( ide_intr_count == 0 && ide_intr_spurious == 0, "not-mine interrupt not counted");
 }
 
+#if IDE_DIAG
 /* the spin budgets' high-water mark records what a successful wait needed */
 static void
 test_spins_hw()
@@ -1263,6 +1276,7 @@ test_spins_hw()
 	read10( &cp, 6, 4L, 1, buf, sizeof buf);
 	CHECK( ide_spins_hw == 50, "a shorter wait leaves the high-water alone");
 }
+#endif	/* IDE_DIAG */
 
 /* the attach banner's MB figure (computed without a shift by 11) */
 static void
@@ -1376,13 +1390,17 @@ int	polled;
 	tur( &cp, 6);
 	mock_nlineops = 0;
 	mock_data_first = mock_data_last = 0;
+#if IDE_DIAG
 	n0 = ide_push_n;
+#endif
 	read10( &cp, 6, 50L, 3, p, 3 * 512);
 	CHECK( cp.okay && cp.status == 0 && disk_equals( 0, 50L, p, 3 * 512), "cache build: read data intact");
 	CHECK( lines_done( (unsigned long)p, 3 * 512UL, 0UL, mock_data_first), "read: every line pushed+invalidated before the transfer");
 	CHECK( lines_done( (unsigned long)p, 3 * 512UL, mock_data_last, ~0UL), "read: and again after it");
 	CHECK( lines_only( (unsigned long)p, 3 * 512UL), "read: no line outside the buffer's range");
+#if IDE_DIAG
 	CHECK( ide_push_n - n0 == 2, "read: two passes");
+#endif
 }
 
 static void
@@ -1411,12 +1429,16 @@ int	polled;
 		p[i] = (char)(i * 7 + polled);
 	mock_nlineops = 0;
 	mock_data_first = mock_data_last = 0;
+#if IDE_DIAG
 	n0 = ide_push_n;
+#endif
 	write10( &cp, 6, 60L, 2, p, 2 * 512);
 	CHECK( cp.okay && cp.status == 0 && disk_equals( 0, 60L, p, 2 * 512), "cache build: write landed");
 	CHECK( lines_done( (unsigned long)p, 2 * 512UL, 0UL, mock_data_first), "write: every line pushed+invalidated before the transfer");
 	CHECK( lines_only( (unsigned long)p, 2 * 512UL), "write: no line outside the buffer's range");
+#if IDE_DIAG
 	CHECK( ide_push_n - n0 == 1, "write: one pass");
+#endif
 }
 
 static void
@@ -1426,7 +1448,8 @@ test_cache_write()
 	cache_write_case( 1);
 }
 
-/* synthesised data (INQUIRY) is covered too; ide_cache = 0 turns it all off */
+/* synthesised data (INQUIRY) is covered too; in an IDE_DIAG build ide_cache = 0
+ * turns it all off */
 static void
 test_cache_synth_and_off()
 {
@@ -1441,14 +1464,48 @@ test_cache_synth_and_off()
 	CHECK( lines_done( (unsigned long)(buf + 3), 36UL, 0UL, ~0UL), "INQUIRY buffer pushed+invalidated");
 	CHECK( lines_only( (unsigned long)(buf + 3), 36UL), "INQUIRY: only its lines");
 
+#if IDE_DIAG
 	ide_cache = 0;
 	mock_nlineops = 0;
 	read10( &cp, 6, 70L, 1, buf, 512);
 	CHECK( cp.okay && cp.status == 0 && mock_nlineops == 0, "ide_cache = 0: no line operations");
 	tur( &cp, 6);
 	ide_cache = 1;
+#endif
 }
 #endif	/* IDE_CACHE */
+
+#if !IDE_DIAG
+/*
+ * A default build has none of the investigation-only symbols, so nothing can
+ * switch the 040/060 line operations off; a READ still pushes and invalidates
+ * its buffer before and after the transfer.
+ */
+static void
+test_diag_absent()
+{
+#if IDE_CACHE
+	struct sdcom	cp;
+	static char	buf[2 * 512 + 32];
+	char		*p = buf + 3;
+#endif
+
+	CHECK( &ide_spins_hw == 0, "default build: no ide_spins_hw");
+#if IDE_CACHE
+	CHECK( &ide_cache == 0, "default build: no ide_cache switch");
+	CHECK( &ide_push_n == 0 && &ide_push_bytes == 0, "default build: no push counters");
+
+	fresh( 1);
+	tur( &cp, 6);
+	mock_nlineops = 0;
+	mock_data_first = mock_data_last = 0;
+	read10( &cp, 6, 80L, 2, p, 2 * 512);
+	CHECK( cp.okay && cp.status == 0 && disk_equals( 0, 80L, p, 2 * 512), "default build: read data intact");
+	CHECK( lines_done( (unsigned long)p, 2 * 512UL, 0UL, mock_data_first), "default build: read pushed+invalidated before");
+	CHECK( lines_done( (unsigned long)p, 2 * 512UL, mock_data_last, ~0UL), "default build: and after");
+#endif
+}
+#endif	/* !IDE_DIAG */
 
 /* ---------------------------------------------------------------- ATAPI */
 
@@ -1885,7 +1942,11 @@ main()
 	fprintf( stderr, "== test_persistent_sdcom_resubmit\n"); test_persistent_sdcom_resubmit();
 	fprintf( stderr, "== test_reentrant_completion\n"); test_reentrant_completion();
 	fprintf( stderr, "== test_intr_not_mine\n"); test_intr_not_mine();
+#if IDE_DIAG
 	fprintf( stderr, "== test_spins_hw\n"); test_spins_hw();
+#else
+	fprintf( stderr, "== test_diag_absent\n"); test_diag_absent();
+#endif
 	fprintf( stderr, "== test_banner_mb\n"); test_banner_mb();
 	fprintf( stderr, "== test_atapi_attach\n"); test_atapi_attach();
 	fprintf( stderr, "== test_atapi_cdfs_sequence\n"); test_atapi_cdfs_sequence();
@@ -1902,8 +1963,12 @@ main()
 	fprintf( stderr, "== test_cache_synth_and_off\n"); test_cache_synth_and_off();
 #endif
 	mock_free();
-#if IDE_CACHE
+#if IDE_CACHE && IDE_DIAG
+	fprintf( stdout, "ide_test (040/060: IDE_CACHE, IDE_NBPP %d, IDE_DIAG): %d checks, %d failures\n", PG, checks, failures);
+#elif IDE_CACHE
 	fprintf( stdout, "ide_test (040/060: IDE_CACHE, IDE_NBPP %d): %d checks, %d failures\n", PG, checks, failures);
+#elif IDE_DIAG
+	fprintf( stdout, "ide_test (IDE_DIAG): %d checks, %d failures\n", checks, failures);
 #else
 	fprintf( stdout, "ide_test: %d checks, %d failures\n", checks, failures);
 #endif

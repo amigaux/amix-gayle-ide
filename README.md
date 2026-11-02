@@ -60,8 +60,9 @@ login works. To my knowledge the first Amix boot on an A4000 with root on IDE.
 - ✅ **Native build** — compiles with the Amix K&R `cc` without diagnostics, links `checkunix`-clean
   through amix-kerntools, boots on an A3000 profile (probe silent) and the Amiberry A4000/AGA profile.
 - ✅ **Host harness** — the unmodified driver source against a mock Gayle/ATA model with an ATAPI
-  CD-ROM, built twice: the 68030 object (1253 checks) and the 68040/68060 one (1576 checks, cache
-  and ordering included); the loadable module form the same two ways (239 checks each).
+  CD-ROM, built twice: the 68030 object (1236 checks) and the 68040/68060 one (1556 checks, cache
+  and ordering included); the diagnostic build (`-DIDE_DIAG`) the same two ways (1253 / 1576
+  checks); the loadable module form the same two ways (240 / 241 checks).
 - 🟡 **Board table** — A4000 entry proven; A1200/A600 entries (task file `0xDA0000`, latched INTREQ,
   Gayle ID register) follow NetBSD/Amiberry and are untested. They are never auto-detected: select
   one with `ide_board_force` (2 = A1200, 3 = A600), which is the only time the Gayle ID register at
@@ -126,7 +127,7 @@ no `unix_boot` patches (68030 = stock `unix_boot` 1.1c).
 The host harness needs only a C compiler:
 
 ```sh
-make -C test/host check      # both variants; exit 0 == every check passed
+make -C test/host check      # every variant; exit 0 == every check passed
 ```
 
 ## The loadable module
@@ -135,14 +136,22 @@ The same source, built with `-DIDE_MODULE`, is `gayle`: a root-class loadable ke
 Amix kernels with amix-dlm's module core. The core loads it before the root is mounted, and it
 registers the port with sd by itself, so no `driver.conf` row, kernel patch or relink is needed.
 Without the switch `src/ide.c` is the static driver, byte for byte (`make -C module static` prints
-the static objects' sums: 68030 `af0ef514…`, 68040/68060 `bdcd9072…`). The plan and the reasons are
+the static objects' sums: 68030 `8f52b4f2…`, 68040/68060 `b4504a8f…`). The plan and the reasons are
 in [`docs/MODULE-PORT.md`](docs/MODULE-PORT.md).
+
+The investigation-only symbols — the spin high-water `ide_spins_hw`, and on the 68040/68060 line the
+data-cache switch `ide_cache` and its counters `ide_push_n` / `ide_push_bytes` — exist only in a
+diagnostic build, `-DIDE_DIAG` (`make -C module DIAG=1`, under `build/<line>-diag`). A default build,
+static or module, has none of them, so the data-cache line operations cannot be switched off. The
+static objects of a diagnostic build are those of 1.1.0-3 and earlier, byte for byte (68030
+`af0ef514…`, 68040/68060 `bdcd9072…`).
 
 ```sh
 make -C module          # build/k30/mod.d/gayle and build/k46/mod.d/gayle, checked by the kit
 make -C module k30      # one line (or k46)
 make -C module static   # the static objects compiled against the kits, and their sha256
 make -C module clean
+make -C module DIAG=1   # a diagnostic build (-DIDE_DIAG), never for shipping
 ```
 
 It is built with amix-dlm's ABI kits, **kabi 1.2 on both lines** (`k30.1.2`, `k46.1.2`): `DLM=` names
@@ -162,8 +171,9 @@ holds no `0xDE1000`.
 
 Interrupt I/O is the default on both lines from 1.1.0-3, and the package sets no parameter. To run
 polled, put the line `param intr=0` in `/etc/conf/modreg.local.d/gayle`, then `kbootset build` and
-`kbootset commit`; removing the line goes back to interrupts. The counters (`ide_spins_hw`, `ide_resets`, `ide_intr_*`, `ideunits`, …)
-are global symbols of the module, so `getksym` finds them at the module's load address.
+`kbootset commit`; removing the line goes back to interrupts. The counters (`ide_resets`,
+`ide_intr_*`, `ideunits`, …; `ide_spins_hw` in a diagnostic build) are global symbols of the module,
+so `getksym` finds them at the module's load address.
 
 **Tested** in emulation (amiberry `ide=a4000`), on the 68060 module kernel kern46m and the 68030 one
 kern30m; host harness `ide_modtest`, 239 checks per line. Module 1.1.0-3 (interrupt I/O by default) on
@@ -253,7 +263,7 @@ module rows (1.1.0-1, `intr` 0 by default) passed the same six rows polled and w
 
 The same `src/ide.c` builds for the 68040/68060 Amix line (amix-040-060-port), whose relink pass
 compiles it with `-m68040 -DIDE_NBPP=4096 -DIDE_CACHE=1` and registers the port itself. Without
-`IDE_CACHE` none of the following is in the object except the spin high-water counter.
+`IDE_CACHE` none of the following is in the object.
 
 - **Interrupts: polled only.** The line's `int2_tbl[]` is a fixed table that the relink pass cannot
   grow, so `ideintr` is never in it. Attach finds no hook, keeps the drive's nIEN set and runs every
@@ -263,16 +273,17 @@ compiles it with `-m68040 -DIDE_NBPP=4096 -DIDE_CACHE=1` and registers the port 
 - **Data cache.** The CPU copies the sectors through the cache-inhibited identity alias, while the
   same physical page may sit in the copyback data cache under a user mapping. Every buffer is pushed
   and invalidated (`CPUSHL` + `CINVL` per 16-byte line, by physical address) before the transfer, and a
-  READ's buffer again after it. `ide_cache` (kmem, default 1) set to 0 skips the line operations for
-  an A/B run; `ide_push_n` / `ide_push_bytes` count them.
+  READ's buffer again after it. Only in a diagnostic build (`-DIDE_DIAG`), `ide_cache` (kmem,
+  default 1) set to 0 skips the line operations for an A/B run, and `ide_push_n` / `ide_push_bytes`
+  count them; a default build always does them, since without them data can be silently corrupted.
 - **Register cache inhibition** is checked at attach from DTT0/DTT1: `ide_ci_ok` is 1 when the task
   file and IRQ mirror are reached cache-inhibited, 2 (with a console line) when they are not.
 - **Ordering.** The registers are cache-inhibited *nonserialized*; a `nop` before every task-file read
   keeps it behind earlier writes once the 68060 store buffer is enabled.
 - **Page size** 4096 for the page-crossing counter (`ide_pagecross_n`).
 - **Spin budgets** ×4 (`IDE_SPIN_SCALE`): the polled loop is bound by the motherboard bus cycle, not the
-  CPU, so the same counts would run out sooner only by the loop overhead. `ide_spins_hw` records the
-  longest successful wait, for calibration on the machine.
+  CPU, so the same counts would run out sooner only by the loop overhead. In a diagnostic build
+  `ide_spins_hw` records the longest successful wait, for calibration on the machine.
 
 Where the port sits in card order beside the Z3660's SCSI is the relink pass's decision, not the
 driver's.

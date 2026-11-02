@@ -58,6 +58,12 @@
  * hook idepresent() and the A1200/A600 rows are not in the module.  Without
  * the switch this file is the static driver, byte for byte.
  *
+ * Built with -DIDE_DIAG (module: make -C module DIAG=1) the object also
+ * carries the investigation-only symbols: the spin high-water ide_spins_hw,
+ * and on the 68040/68060 line the data-cache A/B switch ide_cache and the
+ * ide_push_n / ide_push_bytes counters.  A default build has none of them,
+ * so the line operations cannot be switched off from kmem.
+ *
  * BOARD ABSTRACTION: every board-specific address and interrupt convention is
  * confined to `struct ideboard' and the ide_irq_*() / ide_detect() helpers
  * below.  The rest of the driver sees a task-file base and three interrupt
@@ -261,8 +267,9 @@ extern void	(*int2_tbl[])();	/* master.d/kernel.c, NULL terminated */
  * length whatever the CPU, and only the loop overhead shrinks on a faster
  * one.  An IDE_CACHE (68040/68060) build therefore scales the budgets by
  * IDE_SPIN_SCALE (4), which keeps the wall-clock floor at or above the 030's
- * for any per-iteration speed-up up to 4x.  ide_spins_hw records the most
- * iterations a successful wait has needed (a real 68060 A4000: 2765).
+ * for any per-iteration speed-up up to 4x.  In an IDE_DIAG build ide_spins_hw
+ * records the most iterations a successful wait has needed (a real 68060
+ * A4000: 2765).
  */
 #ifndef IDE_SPIN_SCALE
 #if IDE_CACHE
@@ -274,7 +281,9 @@ extern void	(*int2_tbl[])();	/* master.d/kernel.c, NULL terminated */
 ulong	ide_spins       = 2000000L * IDE_SPIN_SCALE;	/* BSY/DRQ wait inside a polled command */
 ulong	ide_spins_reset = 8000000L * IDE_SPIN_SCALE;	/* BSY wait after reset / for FLUSH CACHE */
 ulong	ide_spins_short = 200000L * IDE_SPIN_SCALE;	/* DRQ wait inside the interrupt path */
+#if IDE_DIAG
 ulong	ide_spins_hw;			/* high-water: iterations a successful wait needed */
+#endif
 
 int	ide_slave_enable = 0;		/* 0: never touch the slave (FlashAir rule),
 					 * 1: attach whatever answers there,
@@ -348,12 +357,16 @@ ulong	ide_pagecross_n;		/* raw (<= IDE_NBPP) requests spanning two pages */
  * before the store buffer is turned on; with it off the NOP costs a few
  * cycles next to a motherboard bus cycle.
  *
- * ide_cache (kmem) turns the line operations off for an A/B run; the NOP and
- * the attach-time check stay.
+ * Only in an IDE_DIAG build, ide_cache (kmem) turns the line operations off
+ * for an A/B run (the NOP and the attach-time check stay), and ide_push_n /
+ * ide_push_bytes count them.  A default build always does the line
+ * operations: without them data can be silently corrupted on the 68060.
  */
 #if IDE_CACHE
+#if IDE_DIAG
 long	ide_cache = 1;			/* 0: no line operations (A/B only) */
 ulong	ide_push_n, ide_push_bytes;	/* push+invalidate passes, bytes covered */
+#endif
 ulong	ide_dtt0, ide_dtt1, ide_cacr;	/* captured at attach */
 ulong	ide_ci_ok;			/* 0 not checked, 1 task file cache-inhibited, 2 NOT */
 
@@ -405,7 +418,11 @@ ulong	pa, len;
 	IDE_LINEPTR;
 	ulong	end;
 
-	if (ide_cache == 0 || pa == 0 || len == 0 || pa + len < pa)
+#if IDE_DIAG
+	if (ide_cache == 0)
+		return;
+#endif
+	if (pa == 0 || len == 0 || pa + len < pa)
 		return;
 	p   = (uchar *)(pa & ~15L);
 	end = (pa + len + 15) & ~15L;
@@ -414,8 +431,10 @@ ulong	pa, len;
 		IDE_CINVL( p);
 		p += 16;
 	}
+#if IDE_DIAG
 	ide_push_n++;
 	ide_push_bytes += len;
+#endif
 }
 
 /*
@@ -636,15 +655,18 @@ uint	mask, want;
 ulong	spins;
 {
 	int	st;
-
+#if IDE_DIAG
 	ulong	n;
 
 	n = spins;
+#endif
 	do {
 		st = TR( IDE_REG_STATUS);
 		if ((st & mask) == want) {
+#if IDE_DIAG
 			if (n - spins > ide_spins_hw)
 				ide_spins_hw = n - spins;
+#endif
 			return st;
 		}
 	} while (spins-- != 0);
@@ -657,14 +679,18 @@ ide_wait_drq( spins)
 ulong	spins;
 {
 	int	st;
+#if IDE_DIAG
 	ulong	n;
 
 	n = spins;
+#endif
 	do {
 		st = TR( IDE_REG_STATUS);
 		if (!(st & IDE_ST_BSY) && (st & (IDE_ST_DRQ | IDE_ST_ERR | IDE_ST_DF))) {
+#if IDE_DIAG
 			if (n - spins > ide_spins_hw)
 				ide_spins_hw = n - spins;
+#endif
 			return st;
 		}
 	} while (spins-- != 0);

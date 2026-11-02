@@ -51,6 +51,13 @@ extern unsigned long	ide_intr_count, ide_intr_spurious, ide_timeout_secs;
 extern unsigned long	ide_halted, ide_selftest, ide_selftest_ticks;
 extern unsigned long	ide_atapi_cmds, ide_atapi_overrun, ide_pagecross_n;
 extern int	ide_slave_enable, ide_debug, ide_master_unit, ide_slave_unit, ide_intr_enable;
+/* investigation-only symbols, defined only in an IDE_DIAG build (weak: the
+ * shipping module must not have them) */
+extern unsigned long	ide_spins_hw __attribute__((weak));
+#if IDE_CACHE
+extern long		ide_cache __attribute__((weak));
+extern unsigned long	ide_push_n __attribute__((weak)), ide_push_bytes __attribute__((weak));
+#endif
 
 extern int	mock_ipl;
 extern long	mock_spl_calls, mock_splx_calls;
@@ -753,6 +760,11 @@ main()
 	fprintf( stderr, "== test_pagecross_quiet\n"); test_pagecross_quiet();
 	fresh( 0);
 	CHECK( id_total == 0, "no access to 0xDE1000 on any module path");
+	CHECK( &ide_spins_hw == 0, "no ide_spins_hw in the module");
+#if IDE_CACHE
+	CHECK( &ide_cache == 0 && &ide_push_n == 0 && &ide_push_bytes == 0,
+	       "no ide_cache switch or push counters in the module");
+#endif
 	mock_free();
 	fprintf( stderr, "%s: %d checks, %d failures\n", name, checks, failures);
 	return failures != 0;

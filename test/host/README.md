@@ -68,6 +68,10 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   and invalidated before the transfer and a read's again after it, nothing outside the buffer, the
   TTR cache-inhibit check on five DTT shapes, no task-file read ahead of an unsynchronised write
   (asserted after every request), the ×4 spin budgets.
+- The diagnostic build (`-DIDE_DIAG`, `ide_test_diag` and `ide_test_040_diag`): the spin
+  high-water `ide_spins_hw`, and on the 68040/68060 line the push counters and the `ide_cache = 0`
+  A/B switch. The default builds declare those symbols weak and check that they are absent, and that
+  a 68040/68060 READ still pushes and invalidates its buffer before and after the transfer.
 - The root-class module form (`-DIDE_MODULE`, `ide_modtest` and `ide_modtest_040`, from
   `ide_modtest.c`, which mocks `bprobe`, `sd_register`, `root_defer`, `intr_attach`/`intr_detach`
   and `sleep`/`wakeup`): the probe order (one VPOSR read, then `bprobe` of ALTSTAT `0xDD303A`, then
@@ -79,4 +83,4 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   set and the handler detached on a mute drive, a refused attach or an ATAPI-only cable;
   `sd_register` and `root_defer` errors; `_halt` (nIEN, no command) and `_unload`; and **no access
   to the Gayle ID register `0xDE1000` on any module path** (`mock_id_reads` + `mock_id_writes`
-  summed over every case).
+  summed over every case), and none of the diagnostic-build symbols.

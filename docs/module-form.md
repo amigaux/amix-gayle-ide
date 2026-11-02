@@ -33,9 +33,10 @@ spec exists. Today the driver links statically into each kernel cut.
   `int2_tbl` becomes `intr_attach`. `printf` and `timeout` must be on the module allowlist. The data-cache
   push uses inline `cpushl`/CACR reads and imports nothing.
 - **Exports:** `idequeue`, `idepresent`, `ideintr` (through the registrations, not by name), the
-  parameters, and the counters (`ide_spins_hw`, `ide_resets`, `ide_atapi_*`, `ide_pagecross_n`,
-  `ide_dup_submits`, `ideunits`). Bench rows read the counters through `/dev/kmem` at map addresses. In a
-  module those addresses move with the slot, so the bench tooling needs the module's load address from the
+  parameters, and the counters (`ide_resets`, `ide_atapi_*`, `ide_pagecross_n`,
+  `ide_dup_submits`, `ideunits`). `ide_spins_hw`, and on k46 `ide_cache`, `ide_push_n` and
+  `ide_push_bytes`, exist only in a diagnostic build (`-DIDE_DIAG`). Bench rows read the counters
+  through `/dev/kmem` at map addresses. In a module those addresses move with the slot, so the bench tooling needs the module's load address from the
   manifest or from `getksym`.
 
 ## The probe under the module rules

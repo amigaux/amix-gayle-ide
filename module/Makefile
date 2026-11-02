@@ -10,6 +10,10 @@
 #                             the kit's headers, and its sha256 (the static
 #                             driver must not change: README.md)
 #   make -C module clean
+#   make -C module DIAG=1     an investigation build (-DIDE_DIAG): adds the
+#                             spin high-water and, on k46, the data-cache A/B
+#                             switch and its counters; under build/<line>-diag,
+#                             never for shipping
 #
 # DLM is the amix-dlm checkout whose kits are built (`make kit` there gives
 # build/kit/k30 and build/kit/k46); KIT_k30 / KIT_k46 name a kit directly.
@@ -46,12 +50,13 @@ else	# one line, the kit's
 
 MODULE = gayle
 OBJS   = ide.o
-MODOUT = $(TOP)/build/$(LINE)
+DIAGFLAGS = $(if $(filter-out 0,$(DIAG)),-DIDE_DIAG=1)
+MODOUT = $(TOP)/build/$(LINE)$(if $(DIAGFLAGS),-diag)
 SRC    = $(TOP)/src
 ALIEN  = -I$(KIT)/stock/usr/sys/amiga/alien
 # the 68040/68060 line: the data-cache maintenance, 4 KiB pages, x4 spin budgets
 LINEFLAGS = $(if $(filter k46,$(LINE)),-DIDE_CACHE=1 -DIDE_NBPP=4096)
-CFLAGS = -DIDE_MODULE -fno-common $(ALIEN) $(LINEFLAGS)
+CFLAGS = -DIDE_MODULE -fno-common $(ALIEN) $(LINEFLAGS) $(DIAGFLAGS)
 vpath %.c $(SRC)
 include $(KIT)/mk/module.mk
 
@@ -63,8 +68,8 @@ nogayleid: $(MODOUT)/mod.d/$(MODULE)
 
 static:
 	mkdir -p $(MODOUT)
-	$(KIT_CC) $(KIT_CFLAGS) $(ALIEN) $(LINEFLAGS) -c $(SRC)/ide.c -o $(MODOUT)/ide-static.o
-	cd $(TOP)/build && sha256sum $(LINE)/ide-static.o
+	$(KIT_CC) $(KIT_CFLAGS) $(ALIEN) $(LINEFLAGS) $(DIAGFLAGS) -c $(SRC)/ide.c -o $(MODOUT)/ide-static.o
+	cd $(TOP)/build && sha256sum $(notdir $(MODOUT))/ide-static.o
 
 .PHONY: static nogayleid
 

@@ -143,7 +143,7 @@ identity.
 
 | Module | Short name | pkginst k30 / k46 | Catalog | Version |
 |---|---|---|---|---|
-| gayle | `gayle` | `gayle30` / `gayle46` | `gayle-k30` / `gayle-k46` | `module/VERSION`, `1.1.0-3` |
+| gayle | `gayle` | `gayle30` / `gayle46` | `gayle-k30` / `gayle-k46` | `module/VERSION`, `1.1.0-4` |
 
 The package ships `/etc/conf/mod.d/gayle` and `/etc/conf/modreg.d/gayle`. It ships no device nodes,
 because sd owns the disk majors. C3-5 v9 §1.1 carries the row (`gayle | gayle | gayle30 / gayle46`).
