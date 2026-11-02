@@ -72,9 +72,25 @@ extern int			mock_intrq;		/* drive asserting INTRQ */
 extern int			mock_irq_latch;		/* A1200/A600 INTREQ bit 7 */
 extern unsigned char		mock_intena;		/* A1200/A600 INTENA register */
 extern unsigned long		mock_irq_acks;		/* acknowledge writes seen */
+extern int			mock_latch_stuck;	/* A1200/A600: an acknowledge does not clear the latch */
 extern unsigned long		mock_id_reads;		/* Gayle ID register reads */
 extern unsigned long		mock_id_writes;		/* Gayle ID register writes */
 extern unsigned long		mock_srst_count;	/* software resets seen (SRST set) */
+
+/* The Kickstart ROM window 0xF80000-0xFFFFFF (the module's board choice).
+ * MOCK_ROM_AUTO gives the board's own: an A1200/A600 ROM (card.resource
+ * among its resident tags) on those boards, an A4000-style ROM otherwise,
+ * which carries the string "card.resource" and a tag-shaped decoy with that
+ * name but no resident of it. */
+#define MOCK_ROM_AUTO	0
+#define MOCK_ROM_PLAIN	1	/* A3000/A4000-style: no card.resource resident */
+#define MOCK_ROM_CARD	2	/* A600/A1200-style: card.resource is resident */
+#define MOCK_ROM_BLANK	3	/* all 0xFF: no resident tag at all */
+#define MOCK_ROM_TAGS	5	/* resident tags in either image */
+extern int			mock_rom;		/* MOCK_ROM_*; mock_reset() sets AUTO */
+extern unsigned long		mock_rom_reads;		/* ROM-window byte reads (not in mock_accesses) */
+extern unsigned long		mock_dd_accesses;	/* any access in 0xDD0000-0xDDFFFF */
+extern unsigned long		mock_da_accesses;	/* any access in 0xDA0000-0xDAFFFF */
 
 /* CPU-side model (IDE_CACHE build): see mock_gayle.c */
 #define MOCK_LINEOPS	8192

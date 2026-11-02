@@ -6,13 +6,25 @@
  * HOST_TEST, against the same mock Gayle/ATA model.  The kernel calls the
  * module form adds are mocked here: bprobe(), sd_register(), root_defer(),
  * intr_attach()/intr_detach(), sleep()/wakeup().  Checks:
- *   - the probe order: one VPOSR read, then bprobe() of ALTSTAT 0xDD303A,
- *     then the task-file readback; no command before the attach's IDENTIFY;
+ *   - the probe order: one VPOSR read, the Kickstart ROM walk, then bprobe()
+ *     of the row's ALTSTAT (0xDD303A, 0xDA101A), then the task-file
+ *     readback; no command before the attach's IDENTIFY;
  *   - ENXIO, silent and unregistered, on OCS/ECS (after the single VPOSR
- *     read), on a bprobe() bus error (no task-file access), with no drive,
- *     and on an A1200-shaped machine;
- *   - the registration: sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4),
- *     polled requests through it;
+ *     read, the ROM not read), on a bprobe() bus error (no task-file
+ *     access), with no drive;
+ *   - the board choice: the ROM walk counts resident tags only (a plain
+ *     "card.resource" string and a tag with a wrong rt_MatchTag are not
+ *     residents), is bounded on a ROM without tags, and picks the A1200 row
+ *     only with card.resource resident; board=1/2 skip the ROM, board=-1
+ *     touches nothing; the A1200 path never touches 0xDD0000-0xDDFFFF and
+ *     the A4000 path never 0xDA0000-0xDAFFFF;
+ *   - the registration: sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4)
+ *     or (idequeue, 0, 0xDA0000, "A1200 IDE", 4), polled requests through it;
+ *   - the A1200 interrupt path: INTENA bit 7 clear after the load, a stale
+ *     latch acknowledged before the self-test, INTENA bit 7 set for it, the
+ *     latch clear after the acknowledge; a latch that does not clear and a
+ *     mute drive give polled I/O with INTENA bit 7 clear; the PCMCIA bits
+ *     of INTENA preserved throughout; _halt clears INTENA bit 7;
  *   - intr: default 1 (root_defer); intr=0 polled, no root_defer; the deferred call
  *     attaches at level 2 and self-tests with one READ VERIFY: pass ->
  *     interrupt I/O, a mute drive or a refused attach -> polled, nIEN set,
@@ -51,6 +63,8 @@ extern unsigned long	ide_intr_count, ide_intr_spurious, ide_timeout_secs;
 extern unsigned long	ide_halted, ide_selftest, ide_selftest_ticks;
 extern unsigned long	ide_atapi_cmds, ide_atapi_overrun, ide_pagecross_n;
 extern int	ide_slave_enable, ide_debug, ide_master_unit, ide_slave_unit, ide_intr_enable;
+extern int	ide_board, ide_cardres;
+extern unsigned long	ide_romtags;
 /* investigation-only symbols, defined only in an IDE_DIAG build (weak: the
  * shipping module must not have them) */
 extern unsigned long	ide_spins_hw __attribute__((weak));
@@ -228,6 +242,8 @@ int	ndrives;
 	ide_spins_short = 20000;
 	ide_intr_count = ide_intr_spurious = 0;
 	ide_halted = ide_selftest = ide_selftest_ticks = 0;
+	ide_cardres = -1;
+	ide_romtags = 0;
 	bp_calls = bp_ret = 0; bp_addr = 0; bp_v = 0; bp_accesses_before = 0;
 	sr_calls = sr_ret = 0; sr_fn = 0; sr_base = sr_name = 0; sr_c = sr_rank = 99;
 	rd_calls = rd_ret = 0; rd_fn = 0; rd_arg = (char *)1;
@@ -360,6 +376,7 @@ test_chipset_gate()
 		e = gayle_load( (char *)0);
 		CHECK( e == ENXIO_, "OCS/ECS: ENXIO");
 		CHECK( mock_accesses == 1, "OCS/ECS: the single VPOSR read, nothing else");
+		CHECK( mock_rom_reads == 0 && ide_cardres == -1, "OCS/ECS: the ROM not read");
 		CHECK( bp_calls == 0, "OCS/ECS: no bprobe");
 		quiet_enxio( "OCS/ECS: not registered");
 	}
@@ -367,6 +384,7 @@ test_chipset_gate()
 	mock_board = MOCK_BOARD_NONE;		/* an A3000: ECS, no Gayle */
 	e = gayle_load( (char *)0);
 	CHECK( e == ENXIO_ && mock_accesses == 1 && mock_bad_accesses == 0, "A3000: ENXIO after VPOSR only");
+	CHECK( mock_rom_reads == 0, "A3000: the ROM not read");
 	quiet_enxio( "A3000: not registered");
 }
 
@@ -396,6 +414,9 @@ test_probe_order()
 	CHECK( bp_addr == 0xDD303AL, "bprobe reads ALTSTAT at 0xDD303A");
 	CHECK( bp_v < 0, "bprobe is a read");
 	CHECK( bp_accesses_before == 1, "VPOSR first, then bprobe, before any task-file access");
+	CHECK( ide_cardres == 0 && ide_romtags == MOCK_ROM_TAGS, "A4000 ROM: every resident walked, no card.resource");
+	CHECK( mock_rom_reads > 0, "the ROM was read for the board choice");
+	CHECK( mock_da_accesses == 0, "A4000 path: nothing at 0xDA0000-0xDAFFFF");
 	CHECK( mock_cmd_log_n >= 1 && mock_cmd_log[0] == 0xEC, "the first command is the attach's IDENTIFY");
 	CHECK( mock_cmd_count[0xEC] == 1, "one IDENTIFY (master only)");
 	CHECK( mock_slave_selects == 0, "slave never selected by default");
@@ -417,16 +438,209 @@ test_no_drive()
 	CHECK( mock_accesses < 40, "no drive: settled in a few accesses, no spin");
 }
 
+/* the ROM walk: residents only, bounded, by kind */
 static void
-test_a1200_shape()
+test_rom_walk()
+{
+	int	e;
+
+	fresh( 1);				/* A4000-style ROM with the string and a decoy */
+	e = gayle_load( (char *)0);
+	CHECK( e == 0 && ide_cardres == 0, "plain ROM: no card.resource resident");
+	CHECK( ide_romtags == MOCK_ROM_TAGS, "plain ROM: the five residents, not the decoy");
+	CHECK( (unsigned long)sr_base == 0xDD2020L, "plain ROM: the A4000 row");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	e = gayle_load( (char *)0);
+	CHECK( e == 0 && ide_cardres == 1, "A1200 ROM: card.resource resident");
+	CHECK( ide_romtags == 4, "A1200 ROM: the walk stops at card.resource, the fourth resident");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	mock_rom = MOCK_ROM_BLANK;		/* no resident anywhere */
+	e = gayle_load( (char *)0);
+	CHECK( ide_cardres == 0 && ide_romtags == 0, "blank ROM: no resident found");
+	CHECK( mock_rom_reads <= 0x80000L + 64, "blank ROM: one bounded pass, word by word");
+	CHECK( e == ENXIO_ && sr_calls == 0, "blank ROM on an A1200: the A4000 row, which is not there");
+	quiet_enxio( "blank ROM: not registered");
+
+	fresh( 1);				/* an A1200 ROM on an A4000: what board=1 is for */
+	mock_rom = MOCK_ROM_CARD;
+	e = gayle_load( (char *)0);
+	CHECK( e == ENXIO_ && bp_addr == 0xDA101AL, "A1200 ROM on an A4000: the A1200 row is tried");
+	quiet_enxio( "A1200 ROM on an A4000: not registered");
+	fresh( 1);
+	mock_rom = MOCK_ROM_CARD;
+	e = gayle_load( "board=1");
+	CHECK( e == 0 && (unsigned long)sr_base == 0xDD2020L, "board=1 on it: the A4000 row");
+	CHECK( mock_rom_reads == 0 && ide_cardres == -1, "board=1: the ROM not read");
+	CHECK( mock_da_accesses == 0, "board=1: nothing at 0xDA0000-0xDAFFFF");
+}
+
+/* an A1200: card.resource resident, a Gayle at 0xDA0000 */
+static void
+test_a1200_probe()
+{
+	struct sdcom	cp;
+	static char	buf[512];
+	int		e;
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	mock_intena = 0x80 | 0x47;		/* Kickstart left IDE and some PCMCIA sources on */
+	e = gayle_load( (char *)0);
+	CHECK( e == 0, "A1200 with a drive: loads");
+	CHECK( bp_calls == 1 && bp_addr == 0xDA101AL && bp_v < 0, "bprobe reads ALTSTAT at 0xDA101A");
+	CHECK( bp_accesses_before == 1, "A1200: VPOSR, the ROM, then bprobe, before any task-file access");
+	CHECK( sr_calls == 1 && sr_fn == idequeue && sr_c == 0 && sr_rank == 4, "A1200: registered, rank 4");
+	CHECK( (unsigned long)sr_base == 0xDA0000L, "A1200: base 0xDA0000");
+	CHECK( sr_name && strcmp( sr_name, "A1200 IDE") == 0, "A1200: name A1200 IDE");
+	CHECK( strstr( mock_console, "ide: A1200 IDE at 0xda0000, polled I/O") != 0, "A1200: polled banner");
+	CHECK( mock_cmd_log_n >= 1 && mock_cmd_log[0] == 0xEC, "A1200: the first command is IDENTIFY");
+	CHECK( mock_nien == 1, "A1200: polled, nIEN set");
+	CHECK( (mock_intena & 0x80) == 0, "A1200: the Gayle IDE interrupt disabled after the load");
+	CHECK( (mock_intena & 0x7F) == 0x47, "A1200: PCMCIA enables preserved");
+	CHECK( mock_dd_accesses == 0, "A1200 path: nothing at 0xDD0000-0xDDFFFF");
+	CHECK( mock_bad_accesses == 0, "A1200: no access outside the board");
+	CHECK( mock_spl_calls == 0 && sl_calls == 0 && mock_timeouts_pending() == 0,
+	    "A1200: no spl, sleep or timeout in the load entry");
+	read1( &cp, 6, 3L, buf);
+	CHECK( intr_calls == 1 && cp.okay && cp.status == 0 && disk_equals( 0, 3L, buf, 512),
+	    "A1200: polled READ(10) through the registration");
+	CHECK( mock_dd_accesses == 0, "A1200 path: still nothing at 0xDD0000-0xDDFFFF");
+	CHECK( mock_id_reads + mock_id_writes == 0, "0xDE1000 untouched");
+
+	fresh( 0);				/* the A1200 port empty */
+	mock_board = MOCK_BOARD_A1200;
+	e = gayle_load( (char *)0);
+	CHECK( e == ENXIO_ && bp_calls == 1, "A1200, no drive: ENXIO after the guard");
+	quiet_enxio( "A1200, no drive: not registered");
+	CHECK( mock_dd_accesses == 0, "A1200, no drive: nothing at 0xDD0000-0xDDFFFF");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	bp_ret = 1;
+	e = gayle_load( (char *)0);
+	CHECK( e == ENXIO_ && mock_accesses == 1, "A1200, bprobe bus error: ENXIO, no task-file access");
+	quiet_enxio( "A1200, bus error: not registered");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A600;		/* ECS: the module has no A600 row */
+	e = gayle_load( (char *)0);
+	CHECK( e == ENXIO_ && mock_accesses == 1 && mock_rom_reads == 0, "A600: ENXIO after VPOSR only");
+	quiet_enxio( "A600: not registered");
+}
+
+static void
+test_board_param()
 {
 	int	e;
 
 	fresh( 1);
-	mock_board = MOCK_BOARD_A1200;		/* AGA, a Gayle at 0xDA0000 */
-	e = gayle_load( (char *)0);
-	CHECK( e == ENXIO_, "A1200: ENXIO (the module knows the A4000 row only)");
-	quiet_enxio( "A1200: not registered");
+	e = gayle_load( "board=-1");
+	CHECK( e == ENXIO_ && ide_board == -1, "board=-1: ENXIO");
+	CHECK( mock_accesses == 0 && mock_rom_reads == 0, "board=-1: nothing read at all");
+	quiet_enxio( "board=-1: not registered");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	e = gayle_load( "board=2");
+	CHECK( e == 0 && ide_board == 2 && (unsigned long)sr_base == 0xDA0000L, "board=2 on an A1200: loads");
+	CHECK( mock_rom_reads == 0 && ide_cardres == -1, "board=2: the ROM not read");
+	CHECK( mock_dd_accesses == 0, "board=2: nothing at 0xDD0000-0xDDFFFF");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	e = gayle_load( "board=1");
+	CHECK( e == ENXIO_ && bp_addr == 0xDD303AL, "board=1 on an A1200: the A4000 row, not there");
+	CHECK( mock_da_accesses == 0, "board=1: nothing at 0xDA0000-0xDAFFFF");
+	quiet_enxio( "board=1 on an A1200: not registered");
+
+	fresh( 1);
+	e = gayle_load( "board=3");
+	CHECK( e == 0 && ide_board == 0, "board=3: the default");
+	CHECK( strstr( mock_console, "ide: parameter board is not -1 to 2; 0 taken") != 0, "board=3 said");
+	fresh( 1);
+	e = gayle_load( "board=-2");
+	CHECK( e == 0 && ide_board == 0, "board=-2: the default");
+	CHECK( strstr( mock_console, "ide: parameter board is not -1 to 2; 0 taken") != 0, "board=-2 said");
+	fresh( 1);
+	e = gayle_load( "intr=-1");
+	CHECK( e == 0 && ide_intr_enable == 1, "intr=-1: no sign where none is allowed");
+	CHECK( strstr( mock_console, "ide: parameter intr is not 0 to 1; 1 taken") != 0, "intr=-1 said");
+	fresh( 1);
+	e = gayle_load( "board=0");
+	CHECK( e == 0 && ide_board == 0 && ide_cardres == 0, "board=0: automatic");
+}
+
+/* the A1200 self-test: INTENA, the stale latch, the latch check */
+static void
+test_a1200_intr()
+{
+	struct sdcom	cp;
+	static char	buf[512];
+	int		e;
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	mock_intena = 0x47;
+	CHECK( gayle_load( (char *)0) == 0, "A1200 intr: loads");
+	mock_irq_latch = 1;			/* a latch from before (Kickstart's last command) */
+	mock_console_reset();
+	mock_spl_reset();
+	e = (*rd_fn)( rd_arg);
+	CHECK( e == 0 && ide_selftest == 1, "A1200: the self-test passes");
+	CHECK( claims == 1 && ide_intr_spurious == 0, "A1200: one interrupt, the test's own");
+	CHECK( mock_cmd_count[0x40] == 1, "A1200: one READ VERIFY");
+	CHECK( (mock_intena & 0x80) != 0, "A1200: INTENA bit 7 set for interrupt I/O");
+	CHECK( (mock_intena & 0x7F) == 0x47, "A1200: PCMCIA enables preserved");
+	CHECK( mock_irq_latch == 0 && mock_irq_acks >= 2, "A1200: the latch acknowledged, clear");
+	CHECK( mock_nien == 0, "A1200: nIEN clear");
+	CHECK( strstr( mock_console, "ide: A1200 IDE, interrupt I/O") != 0, "A1200: interrupt banner");
+	read1( &cp, 6, 9L, buf);
+	CHECK( intr_calls == 0, "A1200 interrupt I/O: the READ completes later");
+	deliver();
+	CHECK( intr_calls == 1 && cp.okay && cp.status == 0 && disk_equals( 0, 9L, buf, 512),
+	    "A1200: the READ completes from the Gayle interrupt");
+	CHECK( mock_irq_latch == 0, "A1200: the latch clear after the READ");
+	gayle_halt();
+	CHECK( mock_nien == 1 && (mock_intena & 0x80) == 0, "A1200 halt: nIEN set, INTENA bit 7 clear");
+	CHECK( (mock_intena & 0x7F) == 0x47, "A1200 halt: PCMCIA enables preserved");
+	CHECK( mock_dd_accesses == 0, "A1200 path: nothing at 0xDD0000-0xDDFFFF");
+	CHECK( mock_id_reads + mock_id_writes == 0, "0xDE1000 untouched");
+
+	fresh( 1);				/* the acknowledge does not clear the latch */
+	mock_board = MOCK_BOARD_A1200;
+	mock_latch_stuck = 1;
+	e = load_intr( (char *)0);
+	CHECK( e == 0 && ide_selftest == 2, "stuck latch: polled");
+	CHECK( strstr( mock_console, "ide: the Gayle interrupt latch did not clear") != 0, "stuck latch said");
+	CHECK( strstr( mock_console, "ide: interrupt self-test failed, polled I/O") != 0, "failure said");
+	CHECK( (mock_intena & 0x80) == 0 && mock_nien == 1, "stuck latch: INTENA bit 7 clear, nIEN set");
+	CHECK( id_calls == 1, "stuck latch: handler detached");
+	CHECK( !mock_int2_asserted(), "stuck latch: INT2 no longer asserted");
+	read1( &cp, 6, 4L, buf);
+	CHECK( intr_calls == 1 && cp.okay && cp.status == 0, "stuck latch: polled READ completes in the call");
+	CHECK( mock_dd_accesses == 0, "A1200 path: nothing at 0xDD0000-0xDDFFFF");
+
+	fresh( 1);				/* the interrupt never comes */
+	mock_board = MOCK_BOARD_A1200;
+	mock_drv[0].mute_intrq = 1;
+	ide_timeout_secs = 2;
+	e = load_intr( (char *)0);
+	ide_timeout_secs = 20;
+	CHECK( e == 0 && ide_selftest == 2, "A1200 mute drive: polled");
+	CHECK( (mock_intena & 0x80) == 0 && mock_nien == 1, "A1200 mute drive: INTENA bit 7 clear, nIEN set");
+	CHECK( id_calls == 1, "A1200 mute drive: handler detached");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A1200;
+	CHECK( gayle_load( (char *)0) == 0, "loads");
+	mock_intena = 0x80 | 0x47;
+	CHECK( gayle_unload() == 0 && (mock_intena & 0x80) == 0 && (mock_intena & 0x7F) == 0x47,
+	    "A1200 _unload: INTENA bit 7 clear, PCMCIA enables preserved");
+	CHECK( mock_id_reads + mock_id_writes == 0, "0xDE1000 untouched");
 }
 
 static void
@@ -750,7 +964,10 @@ main()
 	fprintf( stderr, "== test_bprobe_fault\n"); test_bprobe_fault();
 	fprintf( stderr, "== test_probe_order\n"); test_probe_order();
 	fprintf( stderr, "== test_no_drive\n"); test_no_drive();
-	fprintf( stderr, "== test_a1200_shape\n"); test_a1200_shape();
+	fprintf( stderr, "== test_rom_walk\n"); test_rom_walk();
+	fprintf( stderr, "== test_a1200_probe\n"); test_a1200_probe();
+	fprintf( stderr, "== test_board_param\n"); test_board_param();
+	fprintf( stderr, "== test_a1200_intr\n"); test_a1200_intr();
 	fprintf( stderr, "== test_register_polled\n"); test_register_polled();
 	fprintf( stderr, "== test_params\n"); test_params();
 	fprintf( stderr, "== test_intr_selftest_pass\n"); test_intr_selftest_pass();

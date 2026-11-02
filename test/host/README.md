@@ -74,10 +74,18 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   a 68040/68060 READ still pushes and invalidates its buffer before and after the transfer.
 - The root-class module form (`-DIDE_MODULE`, `ide_modtest` and `ide_modtest_040`, from
   `ide_modtest.c`, which mocks `bprobe`, `sd_register`, `root_defer`, `intr_attach`/`intr_detach`
-  and `sleep`/`wakeup`): the probe order (one VPOSR read, then `bprobe` of ALTSTAT `0xDD303A`, then
-  the task-file readback, no command before IDENTIFY); a silent, unregistered `ENXIO` on OCS/ECS,
-  an A3000, a `bprobe` bus error, an empty port and an A1200-shaped machine; the registration
-  (`idequeue`, card 0, `0xDD2020`, `"A4000 IDE"`, rank 4) and polled requests through it; no spl,
+  and `sleep`/`wakeup`): the probe order (one VPOSR read, the Kickstart ROM walk, then `bprobe` of
+  the row's ALTSTAT, `0xDD303A` or `0xDA101A`, then the task-file readback, no command before
+  IDENTIFY); a silent, unregistered `ENXIO` on OCS/ECS (the ROM not read), an A3000, an A600, a
+  `bprobe` bus error and an empty port; the board choice against a mock ROM window (an A4000-style
+  ROM with the string `card.resource` and a tag-shaped decoy, an A1200 ROM with it resident, a ROM
+  with no tags, an A1200 ROM on an A4000) and the `board` parameter (-1 touches nothing, 1/2 skip the
+  ROM); the A1200 path never touching `0xDD0000`–`0xDDFFFF`, the A4000 path never
+  `0xDA0000`–`0xDAFFFF`; the registration (`idequeue`, card 0, `0xDD2020`, `"A4000 IDE"` or
+  `0xDA0000`, `"A1200 IDE"`, rank 4) and polled requests through it; the A1200 self-test (a stale
+  latch acknowledged, the interrupt enable set, the latch clear after the acknowledge, interrupt
+  I/O; a latch that does not clear and a mute drive give polled I/O with the enable cleared; the
+  PCMCIA enable bits preserved; `_halt` and `_unload` clear the enable); no spl,
   timeout or sleep in the load entry; the parameters (defaults, overrides, bad values); `intr=1`:
   `root_defer`, `intr_attach` at level 2, one READ VERIFY, interrupt I/O on a pass, polled with nIEN
   set and the handler detached on a mute drive, a refused attach or an ATAPI-only cable;

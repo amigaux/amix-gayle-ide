@@ -5,14 +5,16 @@
 # $class root: loaded by the core's root pass before the root is mounted; a
 # root-class module is never unloaded ($unload never).
 # $match mobo:gayle: the registered motherboard probe; gayle_load's own gated
-# probe decides (VPOSR AGA gate, bprobe of ALTSTAT, task-file readback).
+# probe decides (VPOSR AGA gate, the Kickstart ROM's residents choose the
+# A4000 or the A1200 row, bprobe of that row's ALTSTAT, task-file readback).
 # $rank ide: sd's class 4 (C4-1 section 4), the argument gayle_load passes to
 # sd_register.  No $majors: sd owns the disk majors.
 # $modtype misc: MOD_HDRV_WRAPPER, no switch-table slot.
 # Parameters (the static driver's per-kernel tunables): intr 1 = attach INT2
 # after the self-test (the default), 0 = polled I/O; slave 0 never touch the
 # slave, 1 any drive, 2 ATAPI only; debug 0..2; master/slaveunit the SCSI
-# unit numbers.
+# unit numbers; board 0 = the ROM decides (card.resource resident: A1200),
+# 1 = the A4000 row, 2 = the A1200 row, -1 = never probe.
 $modtype misc
 $class root
 $match mobo:gayle
@@ -23,5 +25,6 @@ $param slave:int:0:0:2
 $param debug:int:0:0:2
 $param master:int:6:0:7
 $param slaveunit:int:5:0:7
-$desc A4000 Gayle IDE, root-class disk controller
+$param board:int:0:-1:2
+$desc Gayle IDE (A4000, A1200), root-class disk controller
 gayle	gayle

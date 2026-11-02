@@ -2,7 +2,8 @@
 /*
  * ide.c -- Amix (Commodore Amiga UNIX 2.1, SVR4 m68k) pseudo SCSI host adapter
  *          for the Gayle IDE port of the Amiga 4000.  (The board table also
- *          carries A1200/A600 rows: untested, reachable only by ide_board_force.)
+ *          carries A1200/A600 rows: in the static driver untested and reachable
+ *          only by ide_board_force; the module drives the A1200 row, see below.)
  *
  * Phase 2: interrupt-driven READ/WRITE (level 2, via int2_tbl[]) with a polled
  * fallback, PIO only, LBA28, master drive by default.  On the 68040/68060
@@ -54,9 +55,11 @@
  * module `gayle' (the section at the end of this file; module/ and
  * docs/MODULE-PORT.md): the module probes and attaches in its load entry,
  * registers with sd_register(), and attaches its interrupt later through
- * intr_attach() after a self-test.  The int2_tbl[] search, the sd.c probe
- * hook idepresent() and the A1200/A600 rows are not in the module.  Without
- * the switch this file is the static driver, byte for byte.
+ * intr_attach() after a self-test.  It drives the A4000 and the A1200 rows,
+ * told apart by the Kickstart ROM, never by the Gayle ID register.  The
+ * int2_tbl[] search, the sd.c probe hook idepresent() and the A600 row are
+ * not in the module.  Without the switch this file is the static driver,
+ * byte for byte.
  *
  * Built with -DIDE_DIAG (module: make -C module DIAG=1) the object also
  * carries the investigation-only symbols: the spin high-water ide_spins_hw,
@@ -511,6 +514,8 @@ ulong	lo, hi;				/* lo inclusive, hi exclusive */
  * Gary/Fat Gary space on an A3000/A4000, and the automatic probe must not
  * write there.  Automatic detection is A4000-only (chipset gate + task-file
  * readback); the A1200/A600 rows are untested and never auto-selected.
+ * The module form never reads the Gayle ID either: it takes the A1200 row
+ * when the Kickstart ROM carries card.resource (gayle_load, below).
  */
 struct ideboard {
 	char	*name;
@@ -524,8 +529,8 @@ struct ideboard {
 
 static struct ideboard	ideboards[] = {
 	{ "A4000 IDE", 0xDD2020L, 0xDD3020L, 0L,        0L,        0x00, 1 },
-#ifndef IDE_MODULE	/* the module knows the A4000 row only: no 0xDE1000 access */
 	{ "A1200 IDE", 0xDA0000L, 0xDA9000L, 0xDA9000L, 0xDAA000L, 0xD1, 1 },
+#ifndef IDE_MODULE	/* the module has no A600 row: an ECS machine is not told apart safely */
 	{ "A600 IDE",  0xDA0000L, 0xDA9000L, 0xDA9000L, 0xDAA000L, 0xD0, 0 },
 #endif
 };
@@ -2168,32 +2173,50 @@ idereset()
  * sets no timeout, waits for no interrupt, allocates nothing (the driver's
  * state is its own .data/.bss) and every wait is a bounded spin.  In order:
  *   1. the parameters (defaults: interrupts after the self-test, no slave,
- *      units 6 and 5; intr=0 is polled I/O);
+ *      units 6 and 5, the board found automatically; intr=0 is polled I/O,
+ *      board=-1 touches nothing at all);
  *   2. the chipset gate: one VPOSR read; anything but AGA Alice is ENXIO
  *      after that single read (an A3000 is never touched further);
- *   3. the guard: bprobe() reads the alternate status register (0xDD303A),
- *      which has no side effect; a bus error is ENXIO;
- *   4. the identifying probe registered as mobo:gayle: the task-file
+ *   3. the board: with board=0 (the default) the Kickstart ROM decides.  A
+ *      ROM whose resident modules include card.resource is an A1200's (every
+ *      A600/A1200 ROM carries one, no A3000/A4000/A4000T ROM does); then the
+ *      A1200 row (0xDA0000), else the A4000 row (0xDD2020).  Only ROM space
+ *      is read for this: it is decoded on every Amiga.  A wrong guess would
+ *      read local I/O nothing decodes, which on some CPU cards never ends,
+ *      so neither row's registers are touched before this step.  board=1 or
+ *      2 names the row and skips the ROM;
+ *   4. the guard: bprobe() reads the row's alternate status register
+ *      (0xDD303A, 0xDA101A), which has no side effect; a bus error is ENXIO;
+ *   5. the identifying probe registered as mobo:gayle: the task-file
  *      write/readback of the parameter registers (nIEN, SDH, NSECT/SECT), no
  *      command; open bus or no drive is ENXIO;
- *   5. the attach: polled IDENTIFY of the master (and the slave if `slave'
- *      asks for it); no drive that answers it is ENXIO as well;
- *   6. sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4);
- *   7. with intr=1 (the default), root_defer(gayle_defer, 0).
+ *   6. the attach: polled IDENTIFY of the master (and the slave if `slave'
+ *      asks for it); no drive that answers it is ENXIO as well; on the A1200
+ *      the Gayle's IDE interrupt enable (0xDAA000 bit 7) is cleared;
+ *   7. sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4), or
+ *      sd_register(idequeue, 0, 0xDA0000, "A1200 IDE", 4);
+ *   8. with intr=1 (the default), root_defer(gayle_defer, 0).
  * ENXIO is silent and leaves nothing behind: an empty A4000T port takes no
  * card.  The Gayle ID register at 0xDE1000 lies in Gary space on the A3000
- * and A4000 and is never touched: the module has no A1200/A600 rows.
+ * and A4000 and is never touched, on either row.  The A600 is not driven:
+ * its ECS chipset and its ROM (also the A500's and A2000's) say nothing
+ * certain about the machine.  The PCMCIA side of the A1200 Gayle is left
+ * alone: its interrupt bits are preserved in every INTENA and INTREQ write.
  *
  * gayle_defer() runs at the first sysinit, in process context at level 0.
  * It attaches ide_intr2() at level 2 and self-tests with a real command: the
  * A4000's INTRQ mirror (0xDD3020 bit 7) cannot be set by an INTREQ raise, so
  * the driver clears nIEN, issues READ VERIFY SECTOR(S) for one sector at LBA
  * 0 on the first ATA drive, and waits in one-tick timeout/sleep rounds for
- * ideintr() to count it.  Pass: interrupt I/O from then on.  Fail: nIEN set
- * again, the handler detached, polled I/O, and a console line.
+ * ideintr() to count it.  On the A1200 a stale Gayle latch is acknowledged
+ * and INTENA bit 7 set before the command, and the test passes only when the
+ * latch reads clear after ideintr()'s acknowledge.  Pass: interrupt I/O from
+ * then on.  Fail: INTENA bit 7 cleared, nIEN set again, the handler
+ * detached, polled I/O, and a console line.
  *
- * gayle_halt() masks the drive's interrupt (nIEN); it does not flush and does
- * not wait for a command in flight.
+ * gayle_halt() masks the drive's interrupt (nIEN) and, on the A1200, the
+ * Gayle's IDE interrupt enable; it does not flush and does not wait for a
+ * command in flight.
  * ------------------------------------------------------------------------- */
 
 #ifndef HOST_TEST
@@ -2213,12 +2236,20 @@ extern int	wakeup();
 ulong	ide_halted;			/* the halt pass ran (count) */
 ulong	ide_selftest;			/* 0 not run, 1 passed (interrupt I/O), 2 failed (polled) */
 ulong	ide_selftest_ticks;		/* clock ticks the self-test waited */
+int	ide_board;			/* param board: 0 auto, 1 A4000, 2 A1200, -1 never probe */
+int	ide_cardres = -1;		/* the ROM walk: -1 not run, 0 no card.resource, 1 found */
+ulong	ide_romtags;			/* resident tags the ROM walk passed */
 static char	ide_st_chan;		/* the self-test's sleep channel */
+
+#define IDE_BD_A4000	0		/* ideboards[] rows; board=N takes row N-1 */
+#define IDE_BD_A1200	1
+#define IDE_NBD_MODULE	2
 
 /*
  * One integer parameter from the string the core passes to the load entry:
- * "name=value ..." (decimal), or 0.  Absent: the default.  A value that is
- * not a number in [lo, hi] is said and gives the default.
+ * "name=value ..." (decimal; a leading minus only where lo is negative), or
+ * 0.  Absent: the default.  A value that is not a number in [lo, hi] is said
+ * and gives the default.
  */
 static int
 gayle_iparam( params, name, dflt, lo, hi)
@@ -2226,8 +2257,8 @@ char	*params, *name;
 int	dflt, lo, hi;
 {
 	char	*p, *n;
-	long	v;
-	int	nd;
+	long	v, lim;
+	int	nd, neg;
 
 	if ((p = params) == 0)
 		return dflt;
@@ -2243,13 +2274,81 @@ int	dflt, lo, hi;
 		while (*p && *p != ' ')
 			p++;
 	}
-	for (p++, v = 0, nd = 0; *p >= '0' && *p <= '9'; p++, nd++)
-		v = v <= hi ? v * 10 + (*p - '0') : (long)hi + 1;
+	p++;
+	neg = *p == '-' && lo < 0;	/* a sign only where a negative value is allowed */
+	if (neg)
+		p++;
+	lim = neg ? -(long)lo : (long)hi;
+	for (v = 0, nd = 0; *p >= '0' && *p <= '9'; p++, nd++)
+		v = v <= lim ? v * 10 + (*p - '0') : lim + 1;
+	if (neg)
+		v = -v;
 	if (nd == 0 || (*p != 0 && *p != ' ') || v < lo || v > hi) {
 		printf( "ide: parameter %s is not %d to %d; %d taken\n", name, lo, hi, dflt);
 		return dflt;
 	}
 	return (int)v;
+}
+
+/*
+ * Does the Kickstart ROM carry card.resource among its resident modules?
+ * That is how the module tells an A1200 from an A4000, both AGA, without a
+ * single access to local I/O: every A600/A1200 ROM (2.05 to 3.2.3) has the
+ * resident, no A3000/A4000/A4000T ROM has.  The walk is the one exec makes
+ * at reset: a resident tag is the word 0x4AFC whose next long points at the
+ * word itself (rt_MatchTag); its name pointer is at +14 and rt_EndSkip at +6
+ * says where the next one may start.  Only 0xF80000-0xFFFFFF is read, the
+ * ROM itself (or the copy a CPU card maps there), which every Amiga decodes;
+ * the name is compared as a resident tag's name, so the plain string that
+ * A3000/A4000 ROMs also contain is never mistaken for the module.  Bounded:
+ * at most one pass over the 512 KB, word by word.
+ */
+#define IDE_ROM_BASE	0xF80000L
+#define IDE_ROM_END	0x1000000L
+#define IDE_RTC_MATCHWORD 0x4AFC
+#define IDE_RT_ENDSKIP	6
+#define IDE_RT_NAME	14
+#define IDE_RT_SIZE	26
+
+static ulong
+ide_rl( a)
+ulong	a;
+{
+	return ((ulong)RW( a) << 16) | (ulong)RW( a + 2);
+}
+
+/* the NUL-terminated string at ROM address `a' is `s' */
+static int
+ide_rom_streq( a, s)
+ulong	a;
+char	*s;
+{
+	if (a < IDE_ROM_BASE || a >= IDE_ROM_END - 32)
+		return 0;
+	for (; *s; ++a, ++s)
+		if (RB( a) != (uchar)*s)
+			return 0;
+	return RB( a) == 0;
+}
+
+static int
+ide_rom_cardres()
+{
+	ulong	a, skip;
+
+	ide_romtags = 0;
+	for (a = IDE_ROM_BASE; a <= IDE_ROM_END - IDE_RT_SIZE; ) {
+		if (RW( a) != IDE_RTC_MATCHWORD || ide_rl( a + 2) != a) {
+			a += 2;
+			continue;
+		}
+		ide_romtags++;
+		if (ide_rom_streq( ide_rl( a + IDE_RT_NAME), "card.resource"))
+			return 1;
+		skip = ide_rl( a + IDE_RT_ENDSKIP);
+		a = skip > a + 2 && skip <= IDE_ROM_END ? (skip + 1) & ~1L : a + 2;
+	}
+	return 0;
 }
 
 /*
@@ -2293,6 +2392,8 @@ ide_selftest_run()
 	}
 	before = ide_intr_count;
 	ide_st_armed = 1;
+	ide_irq_ack( ide_bd);			/* A1200: a latch from before is not the test's */
+	ide_irq_enable( ide_bd, 1);		/* A1200: route the IDE latch to INT2 */
 	TW( IDE_REG_CONTROL, 0);		/* nIEN clear: the drive may assert INTRQ */
 	ide_program( drive, IDE_CMD_VERIFY, 0L, 1L);
 	for (t = 0; ide_intr_count == before && t < ide_timeout_secs * HZ; ++t) {
@@ -2303,15 +2404,21 @@ ide_selftest_run()
 	ide_st_armed = 0;
 	ide_selftest_ticks = t;
 	if (ide_intr_count != before) {
-		ide_use_intr = 1;
-		ide_irq_enable( ide_bd, 1);
-		splx( s);
-		return 0;
+		/* a Gayle latch that stays set after the acknowledge would hold
+		 * INT2 asserted for good: polled I/O instead */
+		if (ide_bd->irqack == 0 || !ide_irq_pending( ide_bd)) {
+			ide_use_intr = 1;
+			splx( s);
+			return 0;
+		}
+		printf( "ide: the Gayle interrupt latch did not clear\n");
 	}
+	ide_irq_enable( ide_bd, 0);
 	TW( IDE_REG_CONTROL, IDE_CTL_NIEN);
 	st = ide_wait( IDE_ST_BSY, 0, ide_spins);	/* the command's end, polled */
 	if (st < 0)
 		ide_reset_drive();
+	ide_irq_ack( ide_bd);
 	splx( s);
 	return -1;
 }
@@ -2345,6 +2452,7 @@ int
 gayle_load( params)
 char	*params;
 {
+	struct ideboard	*bd;
 	ushort	vposr;
 	int	e, i;
 
@@ -2353,15 +2461,24 @@ char	*params;
 	ide_debug        = gayle_iparam( params, "debug", 0, 0, 2);
 	ide_master_unit  = gayle_iparam( params, "master", 6, 0, 7);
 	ide_slave_unit   = gayle_iparam( params, "slaveunit", 5, 0, 7);
+	ide_board        = gayle_iparam( params, "board", 0, -1, IDE_NBD_MODULE);
 
+	if (ide_board < 0)
+		return ENXIO;
 	vposr = RW( IDE_VPOSR_ADDR);
 	if (!IDE_VPOSR_IS_AGA( vposr))
 		return ENXIO;
-	if (bprobe( (caddr_t)(ideboards[0].base + IDE_REG_ALTSTAT), -1) != 0)
+	if (ide_board > 0)
+		bd = &ideboards[ide_board - 1];
+	else {
+		ide_cardres = ide_rom_cardres();
+		bd = &ideboards[ide_cardres ? IDE_BD_A1200 : IDE_BD_A4000];
+	}
+	if (bprobe( (caddr_t)(bd->base + IDE_REG_ALTSTAT), -1) != 0)
 		return ENXIO;
-	if (!ide_readback( &ideboards[0]))
+	if (!ide_readback( bd))
 		return ENXIO;
-	ide_bd = &ideboards[0];
+	ide_bd = bd;
 	ide_state = 2;
 	ide_attach();
 	for (i = 0; i < IDE_NDRIVES; ++i)
@@ -2393,13 +2510,15 @@ char	*params;
 int
 gayle_unload()
 {
-	if (ide_bd)
+	if (ide_bd) {
 		TW( IDE_REG_CONTROL, IDE_CTL_NIEN);
+		ide_irq_enable( ide_bd, 0);
+	}
 	idereset();
 	return 0;
 }
 
-/* The halt pass: mask the drive's interrupt (nIEN).  No flush, no wait. */
+/* The halt pass: mask the drive's interrupt (nIEN) and the Gayle's.  No flush, no wait. */
 void
 gayle_halt()
 {
@@ -2412,6 +2531,6 @@ gayle_halt()
 
 #ifndef HOST_TEST
 /* unload=never: a root-class module is pinned */
-MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "A4000 Gayle IDE");
+MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "Gayle IDE (A4000, A1200)");
 #endif
 #endif	/* IDE_MODULE */

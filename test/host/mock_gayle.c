@@ -48,6 +48,112 @@ int			mock_cmd_log[64];
 int			mock_cmd_log_n;
 int			mock_nien, mock_intrq, mock_irq_latch;
 unsigned char		mock_intena;
+int			mock_rom;
+int			mock_latch_stuck;
+unsigned long		mock_rom_reads, mock_dd_accesses, mock_da_accesses;
+
+/* --- the Kickstart ROM window -------------------------------------------- */
+
+#define ROM_BASE	0xF80000L
+#define ROM_SIZE	0x80000L
+static unsigned char	rom[ROM_SIZE];
+static int		rom_built = -1;		/* the kind the image holds */
+
+static void
+rom_w( o, w)
+unsigned long	o;
+unsigned	w;
+{
+	rom[o] = (w >> 8) & 0xFF;
+	rom[o + 1] = w & 0xFF;
+}
+
+static void
+rom_l( o, l)
+unsigned long	o, l;
+{
+	rom_w( o, (unsigned)(l >> 16));
+	rom_w( o + 2, (unsigned)(l & 0xFFFF));
+}
+
+/* a resident tag at offset o: rt_MatchWord, rt_MatchTag, rt_EndSkip (o + 0x100,
+ * the walk goes on word by word from there), its name at o + 0x40 */
+static void
+rom_tag( o, name)
+unsigned long	o;
+const char	*name;
+{
+	rom_w( o, 0x4AFC);
+	rom_l( o + 2, ROM_BASE + o);
+	rom_l( o + 6, ROM_BASE + o + 0x100);
+	rom_l( o + 14, ROM_BASE + o + 0x40);
+	strcpy( (char *)rom + o + 0x40, name);
+}
+
+static void
+rom_build( kind)
+int	kind;
+{
+	unsigned long	o;
+
+	if (kind == MOCK_ROM_BLANK) {
+		memset( rom, 0xFF, sizeof rom);
+		rom_built = kind;
+		return;
+	}
+	for (o = 0; o < ROM_SIZE; o += 2)
+		rom_w( o, 0x4E71);			/* code-like filler, never a tag */
+	rom_tag( 0x00100L, "exec.library");
+	rom_tag( 0x08000L, "expansion.library");
+	rom_tag( 0x20000L, "scsi.device");
+	rom_tag( 0x40000L, kind == MOCK_ROM_CARD ? "card.resource" : "battclock.resource");
+	rom_tag( 0x60000L, "intuition.library");
+	if (kind == MOCK_ROM_PLAIN) {
+		strcpy( (char *)rom + 0x30000L, "card.resource");	/* a string, not a resident */
+		rom_w( 0x50000L, 0x4AFC);			/* tag-shaped, wrong rt_MatchTag */
+		rom_l( 0x50002L, 0);
+		rom_l( 0x50006L, ROM_BASE + 0x50100L);
+		rom_l( 0x5000EL, ROM_BASE + 0x30000L);
+	}
+	rom_built = kind;
+}
+
+static int
+rom_kind()
+{
+	if (mock_rom != MOCK_ROM_AUTO)
+		return mock_rom;
+	return mock_board == MOCK_BOARD_A1200 || mock_board == MOCK_BOARD_A600 ?
+	    MOCK_ROM_CARD : MOCK_ROM_PLAIN;
+}
+
+static int
+in_rom( addr)
+unsigned long	addr;
+{
+	return addr >= ROM_BASE && addr < ROM_BASE + ROM_SIZE;
+}
+
+static unsigned char
+rom_rb( addr)
+unsigned long	addr;
+{
+	if (rom_built != rom_kind())
+		rom_build( rom_kind());
+	mock_rom_reads++;
+	return rom[addr - ROM_BASE];
+}
+
+/* every access: which local-I/O bank it falls in */
+static void
+bank( addr)
+unsigned long	addr;
+{
+	if ((addr & 0xFF0000L) == 0xDD0000L)
+		mock_dd_accesses++;
+	if ((addr & 0xFF0000L) == 0xDA0000L)
+		mock_da_accesses++;
+}
 
 /* CPU-side model for the IDE_CACHE build: an access sequence number, the
  * span of DATA-register accesses, task-file reads that could overtake an
@@ -124,6 +230,9 @@ mock_reset()
 	memset( mock_cmd_count, 0, sizeof mock_cmd_count);
 	mock_accesses = mock_bad_accesses = mock_taskfile_accesses = mock_slave_selects = 0;
 	mock_irq_acks = mock_id_reads = mock_id_writes = 0;
+	mock_rom = MOCK_ROM_AUTO;
+	mock_latch_stuck = 0;
+	mock_rom_reads = mock_dd_accesses = mock_da_accesses = 0;
 	mock_last_cmd = -1;
 	mock_srst_count = 0;
 	mock_cmd_log_n = 0;
@@ -753,7 +862,10 @@ unsigned long	addr;
 {
 	unsigned char	v = 0xFF;
 
+	if (in_rom( addr))
+		return rom_rb( addr);
 	mock_accesses++;
+	bank( addr);
 	if (addr == GAYLE_ID) {
 		mock_id_reads++;
 		if (mock_board == MOCK_BOARD_A1200 || mock_board == MOCK_BOARD_A600) {
@@ -792,6 +904,7 @@ unsigned long	addr;
 unsigned char	v;
 {
 	mock_accesses++;
+	bank( addr);
 	if (addr == GAYLE_ID) {
 		mock_id_writes++;
 		id_cnt = 0;
@@ -805,7 +918,7 @@ unsigned char	v;
 	if ((mock_board == MOCK_BOARD_A1200 || mock_board == MOCK_BOARD_A600)) {
 		if (addr == INTREQ_A1200) {
 			mock_irq_acks++;
-			if (!(v & 0x80))
+			if (!(v & 0x80) && !mock_latch_stuck)
 				mock_irq_latch = 0;
 			return;
 		}
@@ -827,7 +940,10 @@ unsigned long	addr;
 {
 	unsigned short	w;
 
+	if (in_rom( addr) && !(addr & 1))
+		return ((unsigned short)rom_rb( addr) << 8) | rom_rb( addr + 1);
 	mock_accesses++;
+	bank( addr);
 	if (addr == VPOSR) {
 		if (mock_vposr_override)
 			return mock_vposr_value;
@@ -867,6 +983,7 @@ unsigned short	v;
 	struct mock_drive	*d = cur();
 
 	mock_accesses++;
+	bank( addr);
 	if (!(has_gayle() && addr == base() + R_DATA)) {
 		mock_bad_accesses++;
 		return;

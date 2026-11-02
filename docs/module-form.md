@@ -47,6 +47,8 @@ identifying and gated by chipset id. Today's `idepresent()` -> `ide_detect()`:
   A3000 never reaches Gary space.
 - **Positive identification: met for the A4000 row.** The A4000 row identifies the controller by a task-file
   write and readback. The A1200/A600 rows read the Gayle ID register at 0xDE1000, and only when selected.
+  (The module form, from 1.1.0-5, identifies the A1200 by its Kickstart ROM instead and never reads
+  0xDE1000: `MODULE-PORT.md` §8.)
 - **Not met yet: `bprobe` guard.** The task-file accesses are not wrapped in `bprobe`. A bus error there would
   panic. This is the gap to close.
 - **Not met yet: free of side effects.** The readback writes to the sector-count/LBA-low registers. That

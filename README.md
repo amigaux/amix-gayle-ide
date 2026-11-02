@@ -8,8 +8,8 @@
 > The 2026-09-29 section of [`CHANGELOG.md`](CHANGELOG.md) lists what differs from upstream.
 
 A native **Amiga UNIX (Amix 2.1, Commodore's SVR4.0 port to the 68030 Amiga)** driver for the
-**Gayle IDE controller** built into the Amiga 4000 (the board table also carries untested A1200/A600
-rows), so that Amix runs on an **unmodified A4000 with a 68030 CPU card** — no SCSI host adapter needed,
+**Gayle IDE controller** built into the Amiga 4000 (the loadable module also drives the A1200's port;
+the static driver's A1200/A600 rows are untested), so that Amix runs on an **unmodified A4000 with a 68030 CPU card** — no SCSI host adapter needed,
 root on a CF card. Amix shipped with no IDE driver at all; this repo closes that gap. It follows
 the framework, build environment and gotcha catalog of [`amix-a4091`](https://github.com/jusii/amix-a4091)
 and [`amix-z3660scsi`](https://github.com/jusii/amix-z3660scsi).
@@ -62,11 +62,13 @@ login works. To my knowledge the first Amix boot on an A4000 with root on IDE.
 - ✅ **Host harness** — the unmodified driver source against a mock Gayle/ATA model with an ATAPI
   CD-ROM, built twice: the 68030 object (1236 checks) and the 68040/68060 one (1556 checks, cache
   and ordering included); the diagnostic build (`-DIDE_DIAG`) the same two ways (1253 / 1576
-  checks); the loadable module form the same two ways (240 / 241 checks).
+  checks); the loadable module form the same two ways (361 / 362 checks).
 - 🟡 **Board table** — A4000 entry proven; A1200/A600 entries (task file `0xDA0000`, latched INTREQ,
-  Gayle ID register) follow NetBSD/Amiberry and are untested. They are never auto-detected: select
-  one with `ide_board_force` (2 = A1200, 3 = A600), which is the only time the Gayle ID register at
-  `0xDE1000` is read. Amix itself has further A1200/A600 blockers (fast RAM expected at `0x07000000`).
+  Gayle ID register) follow NetBSD/Amiberry and are untested on Amix. In the static driver they are
+  never auto-detected: select one with `ide_board_force` (2 = A1200, 3 = A600), which is the only time
+  the Gayle ID register at `0xDE1000` is read. The loadable module finds the A1200 by its Kickstart
+  ROM instead and never reads that register ([The loadable module](#the-loadable-module)); it has no
+  A600 row. Whether Amix itself runs on an A1200 is a question for the kernel, not this driver.
 - 🟡 **Open on real hardware** — stress and power-cycle `fsck` runs, spin-count calibration of the
   bounded polled waits, the installer route, and cache inhibition of the register ranges (assumed from the stock kernel's
   transparent-translation setup on the 68030; checked at attach on the 68040/68060 line, where a
@@ -99,8 +101,8 @@ generates them from `driver.conf`.
 
 ## Requirements
 
-- An Amiga 4000 or 4000T, whose Gayle IDE port sits at `0xDD2020` (the A1200/A600 rows are untested,
-  see Status).
+- An Amiga 4000 or 4000T, whose Gayle IDE port sits at `0xDD2020`; with the loadable module also an
+  A1200, port at `0xDA0000` (untested on Amix, see Status).
 - 68030 **with a 68881/68882 FPU** (the stock Amix kernel has no software floating point; without an
   FPU it panics in the kernel at the first signal delivery, seconds after `no fpu detected`). For a
   68040/68060 see [The 68040/68060 kernel line](#the-6804068060-kernel-line).
@@ -163,11 +165,15 @@ holds no `0xDE1000`.
 | | |
 |---|---|
 | `.moddata` | `name=gayle`, `class=root`, `match=mobo:gayle`, `rank=ide`, `unload=never`, no `majors` (sd owns the disk majors); `cpu` and `kabi` from the kit |
-| Parameters | `intr` (1: interrupts after a self-test, the default; 0: polled), `slave` (0/1/2 as `ide_slave_enable`), `debug` (0–2), `master` (6) and `slaveunit` (5), the SCSI unit numbers |
-| Load | VPOSR AGA gate, then `bprobe` of the alternate status register `0xDD303A`, then the task-file write/readback (parameter registers only, no command); polled IDENTIFY; `sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4)`. No drive, or no Gayle: `ENXIO`, silently, and no card is taken |
-| Interrupts | by default (`intr=1`), at the first `sysinit`: `intr_attach` at level 2 and a self-test by one READ VERIFY SECTOR(S); polled if it fails or if no ATA drive is attached. Until then, and with `intr=0`, every command is polled |
-| Halt | sets nIEN; no flush |
-| Not in the module | the A1200/A600 rows (the Gayle ID register `0xDE1000` is never touched), the `int2_tbl` search, `idepresent()` |
+| Parameters | `intr` (1: interrupts after a self-test, the default; 0: polled), `slave` (0/1/2 as `ide_slave_enable`), `debug` (0–2), `master` (6) and `slaveunit` (5), the SCSI unit numbers, `board` (0: the ROM decides, the default; 1: the A4000 row; 2: the A1200 row; -1: never probe) |
+| Load | VPOSR AGA gate; then, with `board=0`, a walk of the Kickstart ROM's resident tags (`0xF80000`–`0xFFFFFF` only): `card.resource` resident means an A1200 (every A600/A1200 ROM has it, no A3000/A4000/A4000T ROM does), else the A4000. Then `bprobe` of that row's alternate status register (`0xDD303A` or `0xDA101A`), the task-file write/readback (parameter registers only, no command); polled IDENTIFY; `sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4)` or `sd_register(idequeue, 0, 0xDA0000, "A1200 IDE", 4)`. No drive, or no Gayle: `ENXIO`, silently, and no card is taken. The A1200 path never touches `0xDD0000`–`0xDDFFFF`, the A4000 path never `0xDA0000`–`0xDAFFFF` |
+| Interrupts | by default (`intr=1`), at the first `sysinit`: `intr_attach` at level 2 and a self-test by one READ VERIFY SECTOR(S); polled if it fails or if no ATA drive is attached. On the A1200 the Gayle's latch (`0xDA9000` bit 7) is acknowledged and its IDE interrupt enable (`0xDAA000` bit 7) set before the command, and the test passes only if the latch reads clear after the handler's acknowledge; on failure the enable is cleared again. Until then, and with `intr=0`, every command is polled |
+| Halt | sets nIEN, and on the A1200 clears the Gayle's IDE interrupt enable; no flush |
+| PCMCIA (A1200) | left alone: its bits are preserved in every write of the Gayle interrupt enable and request registers, and its other registers are never touched |
+| Not in the module | the A600 row (an ECS machine with a ROM that the A500 and A2000 share cannot be told apart safely), the Gayle ID register `0xDE1000` (never touched), the `int2_tbl` search, `idepresent()` |
+
+An A1200 ROM run on an A4000 (or the reverse) would pick the wrong row: `board=1` or `board=2` in
+`/etc/conf/modreg.local.d/gayle` names the row and skips the ROM walk.
 
 Interrupt I/O is the default on both lines from 1.1.0-3, and the package sets no parameter. To run
 polled, put the line `param intr=0` in `/etc/conf/modreg.local.d/gayle`, then `kbootset build` and
@@ -198,13 +204,16 @@ module rows (1.1.0-1, `intr` 0 by default) passed the same six rows polled and w
 `ide_pagecross_n`); from 1.1.0-2 the module counts it and prints it only with `param debug=1`.
 
 **Not tested yet:**
+- the A1200 row anywhere but the host harness (from 1.1.0-5): emulation needs an Amix kernel that
+  boots on an A1200;
 - the module on real hardware: the A4000 rows, with interrupts by default, are a 1.1 release gate;
 - the interrupt path on a 68040/68060 on real hardware (the static 040/060 line was polled only).
 
 ## Hardware notes
 
-- Gayle task file at `0xDD2020` (A4000/A4000T), byte registers spaced by 4, control block at `+0x101A`;
-  IRQ mirror at `0xDD3020` bit 7. INT2 is shared with CIA-A, so the handler checks that bit and
+- Gayle task file at `0xDD2020` (A4000/A4000T) or `0xDA0000` (A1200), byte registers spaced by 4,
+  control block at `+0x101A`; IRQ mirror at `0xDD3020` bit 7 on the A4000, a latch at `0xDA9000` bit 7
+  with its enable at `0xDAA000` bit 7 on the A1200. INT2 is shared with CIA-A, so the handler checks that bit and
   returns "not mine" otherwise. No explicit interrupt acknowledge on the A4000 (reading STATUS drops it).
 - `0xDD2020` lies in the identity-mapped low 1 GB (`phystokv(p) == p`), so no `sptalloc()`; the 68030
   cache inhibit comes from the transparent-translation register, not from a per-page bit.

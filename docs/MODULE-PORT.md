@@ -85,8 +85,8 @@ flight.
 It sets nIEN and forgets the probe state (`idereset()`, `:2069-2082`). It returns 0.
 
 **Gone in the module form:** `ide_hooked()` and `kernel-patches/kernel.c.patch`;
-`idepresent()`, `ide_board_force` and the A1200/A600 rows; the `driver.conf` row (it stays for
-the static form).
+`idepresent()`, `ide_board_force` and the A600 row (the A1200 row came back in 1.1.0-5, §8); the
+`driver.conf` row (it stays for the static form).
 
 **DDI names and their minors** (`abi/k30/ddi.list`, `abi/k46/ddi.list`):
 
@@ -223,7 +223,8 @@ The questions as they were put:
    interrupts passes.
 2. **Forced A1200/A600 rows.** Their probe writes `0xDE1000` and is not gated by `mobo:gayle`.
    *Recommend:* drop them from the module and keep them only in the static source. Amix does not
-   run on those machines.
+   run on those machines. *Since 1.1.0-5* the module has the A1200 row again, identified without
+   `0xDE1000` (§8); the answer to question 2 (no module path touches `0xDE1000`) still holds.
 3. **Is the readback a side effect?** It writes parameter registers but issues no command.
    *Recommend:* the `mobo:gayle` registry entry records it as an accepted identifying write, as
    `20-module-format-and-abi.md:218` already describes it.
@@ -237,3 +238,50 @@ The questions as they were put:
 7. **Counters at load addresses.** Bench readers use `/dev/kmem` at link-map addresses.
    *Recommend:* resolve them through `getksym` and the module's load address. No contract change is
    needed.
+
+## 8. The A1200 row (module 1.1.0-5)
+
+The module drives the A1200's Gayle port as well as the A4000's. It identifies the A1200 without the
+Gayle ID register, so §7's proof stands: no module path reads or writes `0xDE1000`, the host harness
+sums the mock's ID accesses over every case, and `make -C module` still finds no `0xDE1000` in either
+linked module.
+
+**Telling an A1200 from an A4000.** Both are AGA Alice, so VPOSR cannot. Probing either task file
+to see what answers is not safe: an undecoded local-I/O read (`0xD80000`–`0xDFFFFF`) never ends on
+some CPU cards, and `bprobe` cannot catch a read that never faults. So the module reads the Kickstart
+ROM, which every Amiga decodes. After the VPOSR gate, with `board=0`, it walks the resident tags of
+`0xF80000`–`0xFFFFFF` the way exec does at reset (the word `0x4AFC` whose next long points at it,
+`rt_EndSkip` to the next one) and looks for one named `card.resource`. A scan of 34 Kickstart images
+(2.0 to 3.2.3) found that resident in every A600 and A1200 ROM and in no A3000, A4000 or A4000T ROM;
+the plain string occurs in the A3000/A4000 ROMs as well, which is why the walk compares resident
+names, not strings. Resident: the A1200 row; otherwise the A4000 row, as before. Neither row's
+registers are touched before this choice. The walk is bounded by one pass over the 512 KB.
+
+**Then, on the A1200 row:** `bprobe` of ALTSTAT `0xDA101A`; the task-file readback at `0xDA0000`;
+the polled IDENTIFY; the Gayle's IDE interrupt enable (`0xDAA000` bit 7) cleared;
+`sd_register(idequeue, 0, 0xDA0000, "A1200 IDE", 4)`. The registration uses the motherboard id of
+the Gayle (C2-1 §2.1, id 2), told apart from the A4000 port by its base and its name. The A1200 path
+never touches `0xDD0000`–`0xDDFFFF`, and the A4000 path never `0xDA0000`–`0xDAFFFF`.
+
+**`board=`** (`board:int:0:-1:2`): 0, the default, lets the ROM decide; 1 takes the A4000 row and 2
+the A1200 row without reading the ROM (an A1200 ROM run on an A4000 would otherwise pick the A1200
+row); -1 makes the load return `ENXIO` without a single access.
+
+**The self-test on the A1200.** The Gayle latches the drive's interrupt at `0xDA9000` bit 7 and passes
+it to INT2 only while `0xDAA000` bit 7 is set. Before the READ VERIFY the module acknowledges a latch
+left from before and sets that enable. The test passes only when the handler took the interrupt and
+the latch reads clear after its acknowledge: a latch that stays set would hold INT2 asserted. On a
+failure the enable is cleared again, nIEN is set, the handler is detached, and I/O is polled. `_halt`
+and `_unload` clear the enable. On the A4000 row these steps are no-ops: it has no latch and no enable.
+
+**PCMCIA is left alone.** Every write of `0xDAA000` changes bit 7 only; the acknowledge writes
+`0x7C` with bits 0–1 as read, so no PCMCIA source is cleared; the card's other registers are never
+touched.
+
+**No A600 row.** The A600 is ECS, and its ROM is the one the A500 and the A2000 also run, so neither
+the chipset nor the ROM identifies it. It needs an identity from the boot loader.
+
+**Tests:** the host harness, `ide_modtest` 361 checks on the 68030 line and 362 on the 68040/68060
+line, with a mock ROM window (a plain ROM with the string and a tag-shaped decoy, an A1200 ROM, a ROM
+with no tags). The A1200 row has not run in emulation or on hardware: that needs an Amix kernel that
+boots on an A1200.
