@@ -42,7 +42,10 @@ unsigned short		mock_vposr_value;
 int			mock_vposr_override;
 unsigned long		mock_accesses, mock_bad_accesses, mock_taskfile_accesses, mock_slave_selects;
 unsigned long		mock_cmd_count[256], mock_irq_acks, mock_id_reads;
+unsigned long		mock_srst_count;
 int			mock_last_cmd = -1;
+int			mock_cmd_log[64];
+int			mock_cmd_log_n;
 int			mock_nien, mock_intrq, mock_irq_latch;
 unsigned char		mock_intena;
 
@@ -82,6 +85,8 @@ mock_reset()
 	mock_accesses = mock_bad_accesses = mock_taskfile_accesses = mock_slave_selects = 0;
 	mock_irq_acks = mock_id_reads = 0;
 	mock_last_cmd = -1;
+	mock_srst_count = 0;
+	mock_cmd_log_n = 0;
 	mock_nien = 1;				/* ATA default after reset: interrupts off? no -- 0.  Driver sets it. */
 	mock_nien = 0;
 	mock_intrq = mock_irq_latch = 0;
@@ -119,7 +124,7 @@ const char	*model;
 	d->present  = 1;
 	d->nsectors = nsectors;
 	d->flush    = flush;
-	d->unc_lba  = -1;
+	d->unc_lba  = -1; d->df_lba  = -1;
 	strncpy( d->model, model, 40);
 	d->disk = malloc( nsectors * MOCK_SECTOR);
 	for (i = 0; i < nsectors * MOCK_SECTOR; ++i)	/* recognisable pattern */
@@ -230,6 +235,12 @@ load_sector()
 		fail( ER_UNC);
 		return;
 	}
+	if (d->df_lba >= 0 && (unsigned long)d->df_lba == xlba) {	/* device fault: ERROR register stale */
+		r_status[sel] = ST_DRDY | ST_DSC | ST_DF;
+		xmode = 0;
+		raise_intrq();
+		return;
+	}
 	memcpy( xbuf, d->disk + xlba * MOCK_SECTOR, MOCK_SECTOR);
 	xidx = 0;
 	r_status[sel] = ST_DRDY | ST_DSC | ST_DRQ;
@@ -245,6 +256,8 @@ int	cmd;
 
 	mock_cmd_count[cmd]++;
 	mock_last_cmd = cmd;
+	if (mock_cmd_log_n < 64)
+		mock_cmd_log[mock_cmd_log_n++] = cmd;
 	if (!d->present)
 		return;
 	r_error = 0;
@@ -263,6 +276,12 @@ int	cmd;
 		xlba = lba();
 		if (xlba + n > d->nsectors) { fail( ER_IDNF); break; }
 		xleft = n;
+		if (d->hang_on_cmd) {		/* command accepted, then the drive dies */
+			d->hang_on_cmd = 0;
+			d->hung = 1;
+			mock_intrq = 0;
+			break;
+		}
 		if (cmd == 0x20) {
 			xmode = 1;
 			load_sector();
@@ -270,6 +289,18 @@ int	cmd;
 			xmode = 2; xidx = 0;
 			r_status[sel] = ST_DRDY | ST_DSC | ST_DRQ;	/* no INTRQ for the first sector */
 		}
+		break;
+	case 0x40:			/* READ VERIFY SECTOR(S): no data phase */
+		if (!(r_sdh & 0x40)) { fail( ER_ABRT); break; }
+		n = r_nsect ? r_nsect : 256;
+		xlba = lba();
+		if (xlba + n > d->nsectors) { fail( ER_IDNF); break; }
+		if (d->unc_lba >= 0 && (unsigned long)d->unc_lba >= xlba && (unsigned long)d->unc_lba < xlba + n) {
+			fail( ER_UNC);
+			break;
+		}
+		r_status[sel] = ST_DRDY | ST_DSC;
+		raise_intrq();
 		break;
 	case 0xE7:			/* FLUSH CACHE */
 		if (d->flush) {
@@ -293,7 +324,7 @@ status()
 
 	if (!d->present)
 		return sel == 0 ? 0xFF : 0x00;	/* open bus / device 1 absent */
-	if (d->stuck_bsy)
+	if (d->stuck_bsy || d->hung)
 		return ST_BSY;
 	return r_status[sel];
 }
@@ -342,8 +373,10 @@ unsigned char	v;
 	case R_ALTSTAT:					/* CONTROL */
 		r_control = v;
 		mock_nien = (v & 0x02) != 0;
-		if (v & 0x04) {				/* SRST */
+		if (v & 0x04) {				/* SRST: both drives */
+			mock_srst_count++;
 			r_status[0] = r_status[1] = ST_DRDY | ST_DSC;
+			mock_drv[0].hung = mock_drv[1].hung = 0;
 			xmode = 0; mock_intrq = 0;
 		}
 		return 1;

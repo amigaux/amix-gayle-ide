@@ -34,7 +34,10 @@ struct mock_drive {
 	char		model[41];
 	unsigned char	*disk;		/* nsectors * 512 */
 	long		unc_lba;	/* -1, or LBA that fails with UNC */
-	int		stuck_bsy;	/* status always BSY */
+	long		df_lba;		/* -1, or LBA that fails with DF set and ERR clear */
+	int		stuck_bsy;	/* status always BSY, even after SRST */
+	int		hung;		/* status BSY, no INTRQ, until a software reset */
+	int		hang_on_cmd;	/* accept the next READ/WRITE, then go `hung' */
 	int		mute_intrq;	/* never assert INTRQ (interrupt lost) */
 };
 
@@ -48,12 +51,15 @@ extern unsigned long		mock_taskfile_accesses;	/* task-file accesses on the selec
 extern unsigned long		mock_slave_selects;	/* SDH writes with DRV1 set */
 extern unsigned long		mock_cmd_count[256];	/* commands issued, by opcode */
 extern int			mock_last_cmd;
+extern int			mock_cmd_log[64];	/* opcodes in issue order */
+extern int			mock_cmd_log_n;
 extern int			mock_nien;		/* drive's nIEN (1 = interrupts off) */
 extern int			mock_intrq;		/* drive asserting INTRQ */
 extern int			mock_irq_latch;		/* A1200/A600 INTREQ bit 7 */
 extern unsigned char		mock_intena;		/* A1200/A600 INTENA register */
 extern unsigned long		mock_irq_acks;		/* acknowledge writes seen */
 extern unsigned long		mock_id_reads;		/* Gayle ID register reads */
+extern unsigned long		mock_srst_count;	/* software resets seen (SRST set) */
 
 void mock_reset();
 void mock_add_drive();			/* (unit, nsectors, model, flush) */

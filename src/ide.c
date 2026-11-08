@@ -29,7 +29,9 @@
  *  - Kernel virtual == physical (sys/immu.h: phystokv(p) == p), so PIO copies
  *    go straight to cp->addr.  Requests are <= NBPP (2048) bytes for raw I/O
  *    and 8 KB (UFS block) from the buffer cache, physically contiguous, exactly
- *    as the stock DMA host adapters receive them.
+ *    as the stock DMA host adapters receive them.  A raw request that crosses
+ *    a page boundary is the one shape whose second page is not guaranteed to
+ *    follow the first; ide_pagecross_n counts those (IDE_NBPP).
  *  - sdspl is spl2 (sd.h).  Level-2 handlers (int2_tbl[] in master.d/kernel.c,
  *    walked by amiga/ml/ttrap.s p2int for every INT2 after it clears the
  *    INTREQ PORTS bit) run at IPL 2, so idequeue()'s spl2 bracket and ideintr()
@@ -150,6 +152,7 @@ extern void	(*int2_tbl[])();	/* master.d/kernel.c, NULL terminated */
 #define IDE_CMD_RECAL		0x10
 #define IDE_CMD_READ		0x20	/* READ SECTOR(S) with retry */
 #define IDE_CMD_WRITE		0x30	/* WRITE SECTOR(S) with retry */
+#define IDE_CMD_VERIFY		0x40	/* READ VERIFY SECTOR(S) with retry: no data */
 #define IDE_CMD_READMULT	0xC4
 #define IDE_CMD_WRITEMULT	0xC5
 #define IDE_CMD_SETMULT		0xC6
@@ -241,6 +244,15 @@ int	ide_debug        = 0;		/* 0 quiet, 1 attach/errors, 2 every command */
  */
 int	ide_master_unit = 6;
 int	ide_slave_unit  = 5;
+
+/*
+ * Kernel page size, for the page-crossing check on raw requests: 2048 on the
+ * 68030 kernel, 4096 on the 68040/68060 line (build with -DIDE_NBPP=4096).
+ */
+#ifndef IDE_NBPP
+#define IDE_NBPP	2048L
+#endif
+ulong	ide_pagecross_n;		/* raw (<= IDE_NBPP) requests spanning two pages */
 
 #define IDE_DATA_SWAP	0		/* 1 if sector data must be byte swapped [verify] */
 
@@ -368,6 +380,9 @@ static int		ide_use_intr;	/* attach(): ideintr is in int2_tbl[] and enabled */
 
 /* interrupt-path bookkeeping (kmem-readable) */
 ulong	ide_intr_count, ide_intr_spurious, ide_intr_timeouts;
+ulong	ide_intr_busy;		/* interrupts taken with the drive still BSY */
+ulong	ide_dup_submits;	/* requests re-submitted while active or queued (ignored) */
+ulong	ide_resets;		/* software resets issued after a timeout */
 
 /* --------------------------------------------------- low-level helpers */
 
@@ -449,7 +464,9 @@ int		st, write;
 	er = TR( IDE_REG_ERROR);
 	u->laststat = st;
 	u->lasterr  = er;
-	if (er & IDE_ER_IDNF)
+	if (!(st & IDE_ST_ERR))			/* DF alone: the ERROR register is stale */
+		ide_setsense( u, SK_HARDWARE, ASC_INTERNAL_FAILURE, 0);
+	else if (er & IDE_ER_IDNF)
 		ide_setsense( u, SK_ILLEGAL, ASC_LBA_OUT_OF_RANGE, 0);
 	else if (er & (IDE_ER_UNC | IDE_ER_BBK | IDE_ER_AMNF))
 		ide_setsense( u, SK_MEDIUM, write ? ASC_WRITE_ERROR : ASC_READ_ERROR, 0);
@@ -607,12 +624,41 @@ ide_attach()
 	printf( "ide: %s, %s I/O\n", ide_bd->name, ide_use_intr ? "interrupt" : "polled");
 }
 
+/*
+ * Software reset of the cable after a command timed out.  The drive may
+ * still be executing the abandoned command and would otherwise complete it
+ * -- interrupt, data and all -- into whatever request comes next.  SRST
+ * (held for well over the 5 us ATA-2 asks) aborts it on both drives; then
+ * BSY is waited out (bounded), STATUS is read to drop a pending INTRQ, the
+ * Gayle latch is acknowledged where there is one, and interrupt enable is
+ * restored to the attach-time setting.  No SET FEATURES state is lost: the
+ * driver sets none.
+ */
+static void
+ide_reset_drive()
+{
+	int	i, st;
+
+	ide_resets++;
+	TW( IDE_REG_CONTROL, IDE_CTL_SRST | IDE_CTL_NIEN);
+	for (i = 0; i < 16; ++i)
+		(void) TR( IDE_REG_ALTSTAT);
+	TW( IDE_REG_CONTROL, IDE_CTL_NIEN);
+	ide_settle();
+	st = ide_wait( IDE_ST_BSY, 0, ide_spins_reset);
+	(void) TR( IDE_REG_STATUS);
+	ide_irq_ack( ide_bd);
+	TW( IDE_REG_CONTROL, ide_use_intr ? 0 : IDE_CTL_NIEN);
+	if (ide_debug)
+		printf( "ide: drive reset after timeout, status 0x%x\n", st);
+}
+
 /* --------------------------------------------------------- polled I/O */
 
-/* Program the task file for `n' sectors at `lba' and issue the command. */
+/* Program the task file for `n' sectors at `lba' and issue ATA command `cmd'. */
 static void
-ide_program( drive, write, lba, n)
-int	drive, write;
+ide_program( drive, cmd, lba, n)
+int	drive, cmd;
 ulong	lba, n;
 {
 	TW( IDE_REG_NSECT, n & 0xFF);			/* 256 -> 0 */
@@ -621,8 +667,44 @@ ulong	lba, n;
 	TW( IDE_REG_HCYL, (lba >> 16) & 0xFF);
 	TW( IDE_REG_SDH,   IDE_SDH_FIXED | IDE_SDH_LBA
 			 | (drive ? IDE_SDH_DRV1 : 0) | ((lba >> 24) & IDE_SDH_HEAD));
-	TW( IDE_REG_COMMAND, write ? IDE_CMD_WRITE : IDE_CMD_READ);
+	TW( IDE_REG_COMMAND, cmd);
 	ide_settle();
+}
+
+/*
+ * Polled READ VERIFY SECTOR(S): the drive reads and checks `nsect' sectors
+ * from `lba' without transferring them.  Returns 0 or -1 (sense set).
+ */
+static int
+ide_verify_polled( u, drive, lba, nsect)
+struct ideunit	*u;
+int		drive;
+ulong		lba, nsect;
+{
+	ulong	chunk;
+	int	st;
+
+	while (nsect > 0) {
+		chunk = nsect > IDE_MAXSECT ? IDE_MAXSECT : nsect;
+		st = ide_select( drive);
+		if (st < 0 || !(st & IDE_ST_DRDY)) {
+			ide_setsense( u, SK_NOT_READY, ASC_LUN_NOT_READY, 0);
+			return -1;
+		}
+		ide_program( drive, IDE_CMD_VERIFY, lba, chunk);
+		st = ide_wait( IDE_ST_BSY, 0, ide_spins);
+		if (st < 0 || (st & (IDE_ST_ERR | IDE_ST_DF))) {
+			if (st < 0) {
+				ide_setsense( u, SK_HARDWARE, ASC_LU_COMM_FAILURE, 0);
+				ide_reset_drive();
+			} else
+				ide_ataerror( u, st, 0);
+			return -1;
+		}
+		lba   += chunk;
+		nsect -= chunk;
+	}
+	return 0;
 }
 
 /*
@@ -648,7 +730,7 @@ ulong		nbyte;
 			ide_setsense( u, SK_NOT_READY, ASC_LUN_NOT_READY, 0);
 			return -1;
 		}
-		ide_program( drive, write, lba, chunk);
+		ide_program( drive, write ? IDE_CMD_WRITE : IDE_CMD_READ, lba, chunk);
 		for (n = 0; n < (int)chunk; ++n) {
 			st = ide_wait_drq( ide_spins);
 			if (st < 0 || (st & (IDE_ST_ERR | IDE_ST_DF))) {
@@ -657,6 +739,7 @@ ulong		nbyte;
 					ide_setsense( u, SK_HARDWARE, ASC_LU_COMM_FAILURE, 0);
 					if (ide_debug)
 						printf( "ide%d: timeout, status 0x%x\n", drive, u->laststat);
+					ide_reset_drive();
 				} else
 					ide_ataerror( u, st, write);
 				return -1;
@@ -672,9 +755,10 @@ ulong		nbyte;
 		}
 		st = ide_wait( IDE_ST_BSY, 0, ide_spins);
 		if (st < 0 || (st & (IDE_ST_ERR | IDE_ST_DF))) {
-			if (st < 0)
+			if (st < 0) {
 				ide_setsense( u, SK_HARDWARE, ASC_LU_COMM_FAILURE, 0);
-			else
+				ide_reset_drive();
+			} else
 				ide_ataerror( u, st, write);
 			return -1;
 		}
@@ -701,8 +785,10 @@ int		drive;
 	if (st < 0 || (st & IDE_ST_ERR)) {
 		if (st >= 0)
 			ide_ataerror( u, st, 1);
-		else
+		else {
+			ide_reset_drive();
 			ide_setsense( u, SK_HARDWARE, ASC_LU_COMM_FAILURE, 0);
+		}
 		return -1;
 	}
 	return 0;
@@ -721,7 +807,7 @@ int		drive;
 static struct sdcom	*ide_cq[IDE_CQ];
 static uint		ide_cq_head, ide_cq_tail;
 static int		ide_completing;
-ulong			ide_cq_overflow;	/* must stay 0 */
+ulong			ide_cq_overflow;	/* completions delivered nested because the FIFO was full */
 
 static void
 ide_complete( cp)
@@ -733,9 +819,11 @@ struct sdcom	*cp;
 
 	s = sdspl();
 	nt = (ide_cq_tail + 1) & (IDE_CQ - 1);
-	if (nt == ide_cq_head) {
-		ide_cq_overflow++;
+	if (nt == ide_cq_head) {		/* full: deliver now rather than lose it */
+		if (ide_cq_overflow++ == 0)
+			printf( "ide: completion queue full, delivering directly\n");
 		splx( s);
+		(*cp->intr)( cp);
 		return;
 	}
 	ide_cq[ide_cq_tail] = cp;
@@ -768,18 +856,42 @@ static struct sdcom	*ide_qhead, *ide_qtail, *ide_active;
 static struct {
 	struct ideunit	*u;
 	int		drive, write;
+	int		nodata;		/* 0: READ/WRITE; else the ATA command that moves no data
+				 * (FLUSH CACHE, READ VERIFY) -- one interrupt per command */
+	ulong		cmdn;		/* sectors covered by the current no-data command */
 	ulong		lba;		/* next LBA to issue / transfer */
 	ulong		left;		/* sectors of the request not yet transferred */
 	ulong		cmdleft;	/* sectors still to move in the current ATA command */
 	uchar		*data;
 	ulong		nbyte, done;
+	ulong		gen;		/* bumped per started request: the watchdog counts ticks per gen */
 } ide_x;
 static int	ide_watch_armed;
-static ulong	ide_watch_ticks;
+static ulong	ide_watch_ticks, ide_watch_gen;
 
 static void	ide_start();
 static void	ide_watchdog();
+static void	ide_reset_drive();
 int		idepresent();
+
+/* Is cp on the cable or waiting for it?  (dd.c can hand us the same sdcom
+ * twice: its completion routine calls iodone() before it starts the next
+ * buffer, and iodone's callback may resubmit the disk's single sdcom while
+ * the first submission is still in flight.  Linking it again would make the
+ * queue eat its own tail.) */
+static int
+ide_pending( cp)
+struct sdcom	*cp;
+{
+	struct sdcom	*p;
+
+	if (cp == ide_active)
+		return 1;
+	for (p = ide_qhead; p; p = (struct sdcom *)p->next)
+		if (p == cp)
+			return 1;
+	return 0;
+}
 
 static void
 ide_enqueue( cp)
@@ -847,9 +959,11 @@ int	err;
 }
 
 /*
- * Issue the next ATA command of the active transfer.  A write must be primed
+ * Issue the next ATA command of the active request.  A write must be primed
  * with its first sector before the drive interrupts; a read interrupts as soon
- * as the first sector is ready.
+ * as the first sector is ready; a no-data command (FLUSH CACHE, READ VERIFY)
+ * interrupts once, when done (ideintr() sees cmdleft == 0, accounts for the
+ * sectors it covered and finishes or issues the next chunk).
  */
 static void
 ide_issue()
@@ -857,6 +971,10 @@ ide_issue()
 	ulong	n;
 	int	st;
 
+	if (ide_x.nodata == IDE_CMD_FLUSH && !ide_x.u->flush) {	/* old drive: nothing to flush */
+		ide_finish( 0);
+		return;
+	}
 	n = ide_x.left > IDE_MAXSECT ? IDE_MAXSECT : ide_x.left;
 	st = ide_select( ide_x.drive);
 	if (st < 0 || !(st & IDE_ST_DRDY)) {
@@ -864,8 +982,18 @@ ide_issue()
 		ide_finish( -1);
 		return;
 	}
-	ide_x.cmdleft = n;
-	ide_program( ide_x.drive, ide_x.write, ide_x.lba, n);
+	if (ide_x.nodata) {
+		ide_x.cmdleft = 0;
+		ide_x.cmdn = n;
+		if (ide_x.nodata == IDE_CMD_FLUSH) {
+			TW( IDE_REG_COMMAND, IDE_CMD_FLUSH);
+			ide_settle();
+		} else
+			ide_program( ide_x.drive, ide_x.nodata, ide_x.lba, n);
+	} else {
+		ide_x.cmdleft = n;
+		ide_program( ide_x.drive, ide_x.write ? IDE_CMD_WRITE : IDE_CMD_READ, ide_x.lba, n);
+	}
 	if (ide_x.write) {
 		st = ide_wait_drq( ide_spins_short);
 		if (st < 0 || (st & (IDE_ST_ERR | IDE_ST_DF))) {
@@ -894,11 +1022,17 @@ ide_start()
 	if (cp == 0)
 		return;
 	ide_active = cp;
-	ide_watch_ticks = 0;
+	ide_x.gen++;
 	/* the transfer description is rebuilt from the CDB, so queued requests
 	 * need no side storage beyond cp->next */
 	ide_x.write = (cp->cdb[0] == SC_WRITE10 || cp->cdb[0] == SC_WRITE6);
-	if (cp->cdb[0] == SC_READ6 || cp->cdb[0] == SC_WRITE6) {
+	ide_x.nodata = cp->cdb[0] == SC_SYNC_CACHE ? IDE_CMD_FLUSH
+		     : cp->cdb[0] == SC_VERIFY10   ? IDE_CMD_VERIFY : 0;
+	ide_x.cmdn = 0;
+	if (ide_x.nodata == IDE_CMD_FLUSH) {
+		ide_x.lba  = 0;
+		ide_x.left = 0;
+	} else if (cp->cdb[0] == SC_READ6 || cp->cdb[0] == SC_WRITE6) {
 		ide_x.lba  = ((ulong)(cp->cdb[1] & 0x1F) << 16) | ((ulong)cp->cdb[2] << 8) | cp->cdb[3];
 		ide_x.left = cp->cdb[4] ? cp->cdb[4] : 256;
 	} else {
@@ -933,8 +1067,10 @@ ideintr()
 		ide_intr_spurious++;
 		return;
 	}
-	if (st & IDE_ST_BSY)			/* not for us yet; the drive will interrupt again */
+	if (st & IDE_ST_BSY) {			/* not for us yet; the drive will interrupt again */
+		ide_intr_busy++;
 		return;
+	}
 	if (st & (IDE_ST_ERR | IDE_ST_DF)) {
 		ide_ataerror( ide_x.u, st, ide_x.write);
 		ide_finish( -1);
@@ -966,6 +1102,10 @@ ideintr()
 		ide_finish( -1);
 		return;
 	}
+	if (ide_x.nodata) {			/* the command covered cmdn sectors */
+		ide_x.lba  += ide_x.cmdn;
+		ide_x.left  = ide_x.left > ide_x.cmdn ? ide_x.left - ide_x.cmdn : 0;
+	}
 	if (ide_x.left > 0)
 		ide_issue();
 	else
@@ -984,11 +1124,16 @@ ide_watchdog()
 
 	s = sdspl();
 	if (ide_active) {
+		if (ide_watch_gen != ide_x.gen) {	/* a new request since the last tick */
+			ide_watch_gen = ide_x.gen;
+			ide_watch_ticks = 0;
+		}
 		if (++ide_watch_ticks > ide_timeout_secs) {
 			ide_intr_timeouts++;
 			ide_x.u->laststat = TR( IDE_REG_STATUS);
 			printf( "ide%d: command timed out (status 0x%x)\n", ide_x.drive, ide_x.u->laststat);
 			ide_setsense( ide_x.u, SK_HARDWARE, ASC_LU_COMM_FAILURE, 0);
+			ide_reset_drive();		/* quiet cable before the next request starts */
 			ide_finish( -1);
 		}
 	}
@@ -1039,6 +1184,13 @@ struct sdcom	*cp;
 	int		drive, write, s, i;
 
 	s = sdspl();
+	if (ide_pending( cp)) {			/* already in flight: it completes once, later */
+		ide_dup_submits++;
+		if (ide_debug)
+			printf( "ide: request re-submitted while in flight, ignored\n");
+		splx( s);
+		return TRUE;
+	}
 	if (ide_state == 0) {			/* sd.c probes first; be robust anyway */
 		char	*pa;
 		(void) idepresent( &pa);
@@ -1063,12 +1215,55 @@ struct sdcom	*cp;
 	if (ide_debug > 1)
 		printf( "ide%d: unit %d cdb 0x%x nbyte %d\n", drive, (int)cp->unit, op, cp->nbyte);
 
+	if (cp->cdb[1] & 0xE0) {		/* a LUN other than 0: there is none */
+		if (op == SC_INQUIRY) {		/* SCSI-2 8.2.5.1: qualifier 011b, type 1Fh */
+			if (data && cp->nbyte) {
+				ide_zero( data, cp->nbyte);
+				data[0] = 0x7F;
+			}
+		} else {
+			ide_setsense( u, SK_ILLEGAL, ASC_LUN_NOT_SUPPORTED, 0);
+			cp->status = SC_CHECK;
+		}
+		splx( s);
+		ide_complete( cp);
+		return TRUE;
+	}
+
 	switch (op) {
 	case SC_TUR:
 	case SC_REZERO:
 	case SC_START_STOP:
-	case SC_VERIFY10:
 	case SC_MODE_SELECT6:
+		break;
+
+	case SC_VERIFY10:
+		/* READ VERIFY SECTOR(S): the drive checks the sectors, no data
+		 * moves.  BYTCHK (compare against supplied data) is not offered. */
+		if (cp->cdb[1] & 0x02) {
+			ide_setsense( u, SK_ILLEGAL, ASC_INVALID_CDB_FIELD, 0);
+			cp->status = SC_CHECK;
+			break;
+		}
+		lba  = ((ulong)cp->cdb[2] << 24) | ((ulong)cp->cdb[3] << 16)
+		     | ((ulong)cp->cdb[4] << 8)  | cp->cdb[5];
+		nblk = ((ulong)cp->cdb[7] << 8) | cp->cdb[8];
+		if (nblk == 0)
+			break;				/* nothing to verify: GOOD */
+		if (lba >= u->nsectors || nblk > u->nsectors - lba) {
+			ide_setsense( u, SK_ILLEGAL, ASC_LBA_OUT_OF_RANGE, 0);
+			cp->status = SC_CHECK;
+			break;
+		}
+		if (ide_use_intr) {
+			ide_enqueue( cp);
+			if (ide_active == 0)
+				ide_start();
+			splx( s);
+			return TRUE;		/* completes from ideintr() */
+		}
+		if (ide_verify_polled( u, drive, lba, nblk) < 0)
+			cp->status = SC_CHECK;
 		break;
 
 	case SC_REQ_SENSE:
@@ -1130,6 +1325,17 @@ struct sdcom	*cp;
 		break;
 
 	case SC_SYNC_CACHE:
+		/* Interrupt mode: take the queue like a transfer, so the flush
+		 * runs after the writes queued before it and never overwrites
+		 * the task file of a command in flight.  Polled mode has
+		 * nothing in flight and flushes inline. */
+		if (ide_use_intr) {
+			ide_enqueue( cp);
+			if (ide_active == 0)
+				ide_start();
+			splx( s);
+			return TRUE;		/* completes from ideintr() */
+		}
 		if (ide_flush( u, drive) < 0)
 			cp->status = SC_CHECK;
 		break;
@@ -1157,7 +1363,12 @@ struct sdcom	*cp;
 			cp->status = SC_CHECK;
 			break;
 		}
-		if (nblk == 0 || lba + nblk > u->nsectors) {
+		if ((ulong)cp->nbyte <= IDE_NBPP
+		    && (((ulong)data ^ ((ulong)data + cp->nbyte - 1)) & ~(IDE_NBPP - 1))) {
+			if (ide_pagecross_n++ == 0 || ide_debug)
+				printf( "ide: raw request of %d bytes crosses a page boundary\n", cp->nbyte);
+		}
+		if (nblk == 0 || lba >= u->nsectors || nblk > u->nsectors - lba) {
 			ide_setsense( u, SK_ILLEGAL, ASC_LBA_OUT_OF_RANGE, 0);
 			cp->status = SC_CHECK;
 			break;
