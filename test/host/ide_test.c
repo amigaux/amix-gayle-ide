@@ -219,9 +219,10 @@ test_probe_no_gayle()
 	mock_board = MOCK_BOARD_NONE;			/* A3000 class, ECS */
 	CHECK( idepresent( &pa) == 0, "no Gayle: probe reports absent");
 	CHECK( mock_taskfile_accesses == 0, "no Gayle: no task-file register touched");
-	CHECK( mock_bad_accesses == 0, "no Gayle: nothing but VPOSR / Gayle ID read");
+	CHECK( mock_id_reads == 0, "no Gayle: Gayle ID register never read");
+	CHECK( mock_accesses == 1 && mock_bad_accesses == 0, "no Gayle: exactly one access, VPOSR");
 	CHECK( pa == 0, "no Gayle: base not written");
-	CHECK( idepresent( &pa) == 0 && mock_taskfile_accesses == 0, "repeated probe still silent");
+	CHECK( idepresent( &pa) == 0 && mock_accesses == 1, "repeated probe still silent");
 }
 
 static void
@@ -256,6 +257,13 @@ test_probe_a4000()
 	fresh( 0);
 	CHECK( idepresent( &pa) == 0, "A4000 without drive: absent");
 	CHECK( mock_cmds() == 0, "A4000 without drive: no ATA command issued");
+	CHECK( mock_id_reads == 0 && mock_bad_accesses == 0, "A4000 without drive: only VPOSR and the task file");
+	CHECK( mock_accesses < 32, "A4000 without drive: open bus settled without a BSY spin");
+
+	fresh( 1);
+	mock_drv[0].stuck_bsy = 1;
+	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDD2020L, "A4000 + drive holding registers while BSY: present");
+	CHECK( mock_accesses < 32, "busy drive: registers held, no BSY spin at probe");
 
 	fresh( 1);
 	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDD2020L, "A4000 + drive: present at 0xDD2020");
@@ -275,22 +283,37 @@ test_probe_a1200_a600()
 {
 	char	*pa = 0;
 
+	fresh( 1);					/* auto probe: the A1200 is never detected */
+	mock_board = MOCK_BOARD_A1200;
+	CHECK( idepresent( &pa) == 0, "A1200, automatic probe: absent (A4000-only auto-detect)");
+	CHECK( mock_id_reads == 0, "A1200, automatic probe: Gayle ID register never read");
+	CHECK( mock_bad_accesses == 0, "A1200, automatic probe: no undecoded address touched");
+
 	fresh( 1);
 	mock_board = MOCK_BOARD_A1200;
-	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDA0000L, "A1200: present at 0xDA0000");
-	CHECK( mock_id_reads == 8, "A1200: Gayle ID read once (8 serial bits)");
-	CHECK( mock_bad_accesses == 0, "A1200: no undecoded address touched");
+	ide_board_force = 2;
+	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDA0000L, "A1200 forced: present at 0xDA0000");
+	CHECK( mock_id_reads == 8, "A1200 forced: Gayle ID confirmed once (8 serial bits)");
+	CHECK( mock_bad_accesses == 0, "A1200 forced: no undecoded address touched");
 	CHECK( strstr( mock_console, "A1200 IDE") != 0, "A1200 named");
 
 	fresh( 1);
 	mock_board = MOCK_BOARD_A600;
-	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDA0000L, "A600: present at 0xDA0000 (ECS chipset)");
+	ide_board_force = 3;
+	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDA0000L, "A600 forced: present at 0xDA0000 (ECS chipset)");
 	CHECK( strstr( mock_console, "A600 IDE") != 0, "A600 named");
+
+	fresh( 1);
+	mock_board = MOCK_BOARD_A600;
+	ide_board_force = 2;
+	CHECK( idepresent( &pa) == 0, "A600 forced as A1200: Gayle ID mismatch, absent");
+	CHECK( mock_taskfile_accesses == 0, "Gayle ID mismatch: task file never touched");
 
 	fresh( 0);
 	mock_board = MOCK_BOARD_A1200;
-	CHECK( idepresent( &pa) == 0, "A1200 without drive: absent");
-	CHECK( mock_bad_accesses == 0, "A1200 without drive: no undecoded address touched");
+	ide_board_force = 2;
+	CHECK( idepresent( &pa) == 0, "A1200 forced without drive: absent");
+	CHECK( mock_bad_accesses == 0, "A1200 forced without drive: no undecoded address touched");
 }
 
 static void
@@ -303,10 +326,15 @@ test_probe_force()
 	CHECK( idepresent( &pa) == 0 && mock_accesses == 0, "force -1: never probes");
 
 	fresh( 1);
-	mock_board = MOCK_BOARD_A1200;
+	ide_board_force = 1;
+	mock_vposr_value = 0x2000; mock_vposr_override = 1;	/* chipset says ECS */
+	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDD2020L, "force 1: A4000 without the chipset gate");
+	CHECK( mock_id_reads == 0, "force 1: Gayle ID register not read for the A4000 row");
+
+	fresh( 1);					/* an A4000, operator wrongly forces A1200 */
 	ide_board_force = 2;
-	CHECK( idepresent( &pa) == 1 && pa == (char *)0xDA0000L, "force 2: A1200 without gates");
-	CHECK( mock_id_reads == 0, "force: ID register not read");
+	CHECK( idepresent( &pa) == 0, "force 2 on an A4000: Gayle ID does not match, absent");
+	CHECK( mock_id_reads == 8 && mock_bad_accesses == 0, "force 2 on an A4000: ID read, 0xDA0000 never touched");
 }
 
 /* ------------------------------------------------------- attach tests */
@@ -360,6 +388,7 @@ test_a1200_interrupt_plumbing()
 
 	fresh( 1);
 	mock_board = MOCK_BOARD_A1200;
+	ide_board_force = 2;
 	tur( &cp, 6);
 	CHECK( (mock_intena & 0x80) != 0, "A1200: INTENA bit 7 set at attach");
 	read10( &cp, 6, 10L, 4, buf, sizeof buf);

@@ -228,7 +228,7 @@ ulong	ide_spins_short = 200000L;	/* DRQ wait inside the interrupt path */
 
 int	ide_slave_enable = 0;		/* 0: never touch the slave (FlashAir rule) */
 int	ide_intr_enable  = 1;		/* 0: force polled I/O even if hooked */
-int	ide_board_force  = 0;		/* 0 auto-detect, 1.. = ideboards[] index+1, -1 = never probe */
+int	ide_board_force  = 0;		/* 0 auto-detect (A4000 only), 1.. = ideboards[] index+1, -1 = never probe */
 ulong	ide_timeout_secs = 20;		/* watchdog for an interrupt-driven command */
 int	ide_debug        = 0;		/* 0 quiet, 1 attach/errors, 2 every command */
 
@@ -266,8 +266,11 @@ int	ide_slave_unit  = 5;
  *          (bit 7 must be set to route IDE to INT2).  Gayle ID 0xD1.
  *   A600   as the A1200 but ECS chipset and Gayle ID 0xD0.
  * The Gayle ID is read bit-serially from 0xDE1000 (write resets, then eight
- * reads deliver the bits, MSB first, in bit 7).  [verify] on real hardware
- * that 0xDE1000 reads harmlessly on an A4000/A3000 (Gary decodes 0xDExxxx).
+ * reads deliver the bits, MSB first, in bit 7).  It is consulted ONLY when
+ * the operator names an A1200/A600 row through ide_board_force: 0xDExxxx is
+ * Gary/Fat Gary space on an A3000/A4000, and the automatic probe must not
+ * write there.  Automatic detection is A4000-only (chipset gate + task-file
+ * readback); the A1200/A600 rows are untested and never auto-selected.
  */
 struct ideboard {
 	char	*name;
@@ -1185,8 +1188,27 @@ struct sdcom	*cp;
 
 /*
  * Write two distinct values to the master's sector count / sector number
- * registers at `base' and read them back.  Open bus or a missing drive does
- * not hold both.  Leaves the drive with interrupts disabled.
+ * registers and read them back.  Open bus or a missing drive does not hold
+ * both.  Caller has set ide_bd.
+ */
+static int
+ide_readback_regs()
+{
+	TW( IDE_REG_NSECT, 0x55);
+	TW( IDE_REG_SECT,  0xAA);
+	if (TR( IDE_REG_NSECT) != 0x55 || TR( IDE_REG_SECT) != 0xAA)
+		return 0;
+	TW( IDE_REG_NSECT, 0xAA);
+	TW( IDE_REG_SECT,  0x55);
+	return TR( IDE_REG_NSECT) == 0xAA && TR( IDE_REG_SECT) == 0x55;
+}
+
+/*
+ * Is a drive answering at the board's task file?  The readback runs first,
+ * so a port with nothing attached (open bus, status reads 0xFF) is settled in
+ * a dozen accesses.  Only when the registers do not hold AND the status shows
+ * a drive still busy (power-on reset, not 0xFF) is BSY waited out, bounded,
+ * and the readback retried.  Leaves the drive with interrupts disabled.
  */
 static int
 ide_readback( bd)
@@ -1198,29 +1220,28 @@ struct ideboard	*bd;
 	TW( IDE_REG_CONTROL, IDE_CTL_NIEN);
 	TW( IDE_REG_SDH, IDE_SDH_FIXED | IDE_SDH_LBA);
 	ide_settle();
-	st = ide_wait( IDE_ST_BSY, 0, ide_spins_reset);
-	ok = 0;
-	TW( IDE_REG_NSECT, 0x55);
-	TW( IDE_REG_SECT,  0xAA);
-	if (TR( IDE_REG_NSECT) == 0x55 && TR( IDE_REG_SECT) == 0xAA) {
-		TW( IDE_REG_NSECT, 0xAA);
-		TW( IDE_REG_SECT,  0x55);
-		if (TR( IDE_REG_NSECT) == 0xAA && TR( IDE_REG_SECT) == 0x55 && st >= 0)
-			ok = 1;
+	ok = ide_readback_regs();
+	if (!ok) {
+		st = TR( IDE_REG_ALTSTAT);
+		if (st != 0xFF && (st & IDE_ST_BSY)) {
+			st = ide_wait( IDE_ST_BSY, 0, ide_spins_reset);
+			if (st >= 0)
+				ok = ide_readback_regs();
+		}
 	}
 	ide_bd = 0;
 	return ok;
 }
 
 /*
- * Board detection.  Order matters: no task-file address is touched before a
- * gate says a controller can be there.
- *  1. AGA chipset (VPOSR) and a drive answering at the A4000 base -> A4000.
- *  2. Otherwise the Gayle ID register names an A1200 (0xD1) or A600 (0xD0)
- *     Gayle, confirmed by the chipset and a readback at the A1200 base.
- *  3. Nothing -> no controller (A3000, A2000 ...).
- * ide_board_force bypasses the gates (still readback-verified) or, at -1,
- * keeps the driver from probing at all.
+ * Board detection.  The automatic probe knows the A4000 only, and no address
+ * outside the custom chips is touched before a gate says a controller can be
+ * there: read VPOSR; on an AGA chipset look for a drive answering at the
+ * A4000 task file; anything else (A3000, A2000 ...) is "no controller" after
+ * that single VPOSR read.  The A1200/A600 rows are reached only through
+ * ide_board_force (1.. = row): the row's Gayle ID, where it has one, is then
+ * confirmed at 0xDE1000 -- the one place that register is ever read -- and
+ * the readback still has to succeed.  -1 keeps the driver from probing at all.
  */
 static struct ideboard *
 ide_detect()
@@ -1228,27 +1249,27 @@ ide_detect()
 	struct ideboard	*bd;
 	ushort		vposr;
 	uint		id;
-	int		aga, i;
 
 	if (ide_board_force < 0)
 		return 0;
 	if (ide_board_force > 0 && ide_board_force <= IDE_NBOARDS) {
 		bd = &ideboards[ide_board_force - 1];
+		if (bd->gayleid) {
+			id = ide_gayle_id();
+			if (id != bd->gayleid) {
+				if (ide_debug)
+					printf( "ide: forced %s but Gayle id is 0x%x, not 0x%x\n",
+						bd->name, id, bd->gayleid);
+				return 0;
+			}
+		}
 		return ide_readback( bd) ? bd : 0;
 	}
 	vposr = RW( IDE_VPOSR_ADDR);
-	aga = IDE_VPOSR_IS_AGA( vposr);
-	if (aga && ide_readback( &ideboards[0]))
+	if (IDE_VPOSR_IS_AGA( vposr) && ide_readback( &ideboards[0]))
 		return &ideboards[0];
-	id = ide_gayle_id();
-	for (i = 1; i < IDE_NBOARDS; ++i) {
-		bd = &ideboards[i];
-		if (bd->gayleid == id && bd->aga == aga && ide_readback( bd))
-			return bd;
-	}
 	if (ide_debug)
-		printf( "ide: no Gayle IDE (VPOSR id 0x%x, Gayle id 0x%x)\n",
-			IDE_VPOSR_ID( vposr), id);
+		printf( "ide: no Gayle IDE (VPOSR id 0x%x)\n", IDE_VPOSR_ID( vposr));
 	return 0;
 }
 

@@ -34,8 +34,8 @@ Compilation and kernel integration go through `amix-kerntools`, which reads this
 `UNIX_Boot` partition, the kernel mounts root `c6d0s1` and swap `c6d0s2` through this driver, root
 login works. To my knowledge the first Amix boot on an A4000 with root on IDE.
 
-- ✅ **Probe** `idepresent()` — AGA chipset gate via VPOSR, then a task-file write/readback; silent on
-  an A3000 without touching the Gayle addresses.
+- ✅ **Probe** `idepresent()` — AGA chipset gate via VPOSR, then a task-file write/readback at the
+  A4000 base; on an A3000 it reads VPOSR and nothing else. Automatic detection is A4000-only.
 - ✅ **Command execution** `idequeue()` — READ/WRITE(6)/(10), REQUEST SENSE, INQUIRY, TEST UNIT READY,
   READ CAPACITY(10), MODE SENSE(6), START/STOP UNIT, SYNCHRONIZE CACHE → ATA READ/WRITE SECTOR(S),
   IDENTIFY DEVICE, FLUSH CACHE, with synthesised sense data. PIO only, LBA28.
@@ -46,8 +46,9 @@ login works. To my knowledge the first Amix boot on an A4000 with root on IDE.
   through amix-kerntools, boots on an A3000 profile (probe silent) and the Amiberry A4000/AGA profile.
 - ✅ **Host harness** — the unmodified driver source against a mock Gayle/ATA model, 439 checks.
 - 🟡 **Board table** — A4000 entry proven; A1200/A600 entries (task file `0xDA0000`, latched INTREQ,
-  Gayle ID register) follow NetBSD/Amiberry and are untested. Amix itself has further A1200/A600
-  blockers (fast RAM expected at `0x07000000`).
+  Gayle ID register) follow NetBSD/Amiberry and are untested. They are never auto-detected: select
+  one with `ide_board_force` (2 = A1200, 3 = A600), which is the only time the Gayle ID register at
+  `0xDE1000` is read. Amix itself has further A1200/A600 blockers (fast RAM expected at `0x07000000`).
 - 🟡 **Open on real hardware** — stress and power-cycle `fsck` runs, spin-count calibration of the
   bounded polled waits, the installer route. The **IDE slave** stays disabled unless `ide_slave_enable`
   is set.
