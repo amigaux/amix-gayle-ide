@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-13 — `make -C module` builds buddha beside gayle (219dba3, 68d2bf8, e6f2d39)
+
+`buddha` is in the default target on both lines and needs kabi 1.5 kits (`k30.1.5` / `k46.1.5`), whose module core takes the match key `zorro:1212:00`; `gayle` still needs only kabi 1.2. `buddha` builds in its own `build/buddha/<line>`, so the two modules build in either order. The default `DLM` is `../amix/kernel/dlm`, with a standalone `../amix-dlm` still used where only that exists. buddha k30 13fa7fa4 (15580 bytes), k46 1a71a253 (16292 bytes); the static objects and `gayle` are unchanged.
+
 ## 2026-11-13 — the buddha module: Buddha and Catweasel Z-II IDE (2292d21..cab07c3)
 
 A build flavour of the driver (`-DIDE_BUDDHA`, Buddha code in marked sections of src/ide.c) gives a second module `buddha` for the Individual Computers Buddha (two ports) and Catweasel Z-II (three ports). Boards are found with autocon and each port probed; one sd_register per board at its AutoConfig base, rank ide. Units are fixed per port and drive: 6/5, 3/2, 1/0. Disks and ATAPI drives, master and slave, one command on the board at a time; INT2 through root_defer; nIEN on every drive at halt. Host harness: per-port cables in the mock and ide_budtest, 174 checks per line. The static objects and `gayle` are byte-identical to 1.1.0-5. The module stays out of the default target until the kit accepts a product-00 match key. Tested on the host only.
