@@ -5,11 +5,11 @@
 #
 #   make -C module            both lines: build/k30/mod.d/gayle and
 #                             build/k46/mod.d/gayle, each checked by the kit's
-#                             modfix and modcheck.py, and scanned for 0xDE1000
-#   make -C module buddha     both lines of buddha: build/buddha/k30/mod.d/buddha
-#                             and build/buddha/k46/mod.d/buddha, checked the
-#                             same way
-#   make -C module k30        one line (or k46)
+#                             modfix and modcheck.py, and scanned for 0xDE1000;
+#                             then build/buddha/k30/mod.d/buddha and
+#                             build/buddha/k46/mod.d/buddha, checked the same way
+#   make -C module buddha     buddha alone, both lines
+#   make -C module k30        one line of both modules (or k46)
 #   make -C module static     the static object of each line compiled against
 #                             the kit's headers, and its sha256 (the static
 #                             driver must not change: README.md)
@@ -21,7 +21,9 @@
 #
 # DLM is the amix-dlm checkout whose kits are built (`make kit` there gives
 # build/kit/k30 and build/kit/k46); KIT_k30 / KIT_k46 name a kit directly.
-# The kits must be kabi k30.1.2 / k46.1.2 or later (root_defer on k30).
+# The kits must be kabi k30.1.2 / k46.1.2 or later (root_defer on k30) for
+# gayle, and k30.1.5 / k46.1.5 or later for buddha (minor 5: a core that takes
+# its match key zorro:1212:00, a product of 00; amix-dlm C3-2 section 3).
 # The pinned cross tools (m68k-cbm-sysv4-*) and python3 must be on PATH.
 # The kit's fragment does the rest: objects and the module under
 # build/<line> (MODOUT, here the repo's build/), $cpu from the line.
@@ -37,10 +39,8 @@ all: $(LINES)
 
 $(LINES):
 	$(MAKE) KIT=$(call kit,$@) all nogayleid
+	$(MAKE) -C buddha KIT=$(call kit,$@) all nogayleid
 
-# buddha is not in `all' yet: the module core and the kit's modcheck refuse a
-# zorro match key whose product is 00 (amix-dlm C3-1 section 3), and the
-# Buddha's product is 0x00.
 buddha: $(LINES:%=buddha-%)
 
 $(LINES:%=buddha-%): buddha-%:

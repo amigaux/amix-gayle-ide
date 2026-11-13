@@ -223,12 +223,14 @@ macros that a Gayle build defines to exactly what it compiled before, so the sta
 `gayle` keep their bytes.
 
 ```sh
-make -C module buddha   # build/buddha/k30/mod.d/buddha and build/buddha/k46/mod.d/buddha
+make -C module          # gayle, then buddha: build/buddha/k30/mod.d/buddha and build/buddha/k46/mod.d/buddha
+make -C module buddha   # buddha alone
 ```
 
-`buddha` is not in the default target yet: its match key `zorro:1212:00` has product 00, which the
-kit's `modcheck` and the module core refuse today ("neither the manufacturer nor the product may be
-zero"). Every other check of the kit passes.
+`buddha` needs kits of **kabi 1.5 or later** (`k30.1.5`, `k46.1.5`) and runs on kernels of that
+minor: its match key `zorro:1212:00` has product 00, which only a core of minor 5 takes (amix-dlm
+C3-1 version 7, C3-2 version 5). The kit's `modcheck` tags it `k30.1.5` / `k46.1.5`. `gayle` keeps
+its own minimum, kabi 1.2.
 
 | | |
 |---|---|
