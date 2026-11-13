@@ -19,6 +19,10 @@
 # unload entries against the same mock, with the kernel calls it adds mocked
 # in ide_modtest.c.
 #
+# The Buddha / Catweasel Z-II flavour (-DIDE_MODULE -DIDE_BUDDHA, the module
+# `buddha') is built and run the same two ways (ide_budtest, ide_budtest_040)
+# against the mock's Buddha boards.
+#
 # The investigation build (-DIDE_DIAG) is built and run the same two ways as
 # well (ide_test_diag, ide_test_040_diag): the spin high-water, and on the
 # 040/060 line the ide_cache A/B switch and the push counters.  The default
@@ -45,7 +49,9 @@ MODBIN    := $(BUILD)/ide_modtest
 MODBIN040 := $(BUILD)/ide_modtest_040
 DIAGBIN   := $(BUILD)/ide_test_diag
 DIAGBIN040 := $(BUILD)/ide_test_040_diag
-ALLBIN    := $(BIN) $(BIN040) $(DIAGBIN) $(DIAGBIN040) $(MODBIN) $(MODBIN040)
+BUDBIN    := $(BUILD)/ide_budtest
+BUDBIN040 := $(BUILD)/ide_budtest_040
+ALLBIN    := $(BIN) $(BIN040) $(DIAGBIN) $(DIAGBIN040) $(MODBIN) $(MODBIN040) $(BUDBIN) $(BUDBIN040)
 
 .PHONY: all check clean
 all: $(ALLBIN)
@@ -73,6 +79,18 @@ $(BUILD)/ide_mod.o: $(DRV) $(STUBS)
 $(BUILD)/ide_mod_040.o: $(DRV) $(STUBS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(CACHE) -DHOST_TEST -DIDE_MODULE -Istubs -I$(SRC) -include mock_regs.h -c $(DRV) -o $@
+
+$(BUILD)/ide_bud.o: $(DRV) $(STUBS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -DHOST_TEST -DIDE_MODULE -DIDE_BUDDHA=1 -Istubs -I$(SRC) -include mock_regs.h -c $(DRV) -o $@
+
+$(BUILD)/ide_bud_040.o: $(DRV) $(STUBS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(CACHE) -DHOST_TEST -DIDE_MODULE -DIDE_BUDDHA=1 -Istubs -I$(SRC) -include mock_regs.h -c $(DRV) -o $@
+
+$(BUILD)/ide_budtest_040.o: ide_budtest.c mock_gayle.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(CACHE) -c $< -o $@
 
 $(BUILD)/ide_modtest_040.o: ide_modtest.c mock_gayle.h
 	@mkdir -p $(BUILD)
@@ -112,6 +130,12 @@ $(MODBIN): $(BUILD)/ide_mod.o $(BUILD)/ide_modtest.o $(HOST_OBJS)
 $(MODBIN040): $(BUILD)/ide_mod_040.o $(BUILD)/ide_modtest_040.o $(HOST_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(BUDBIN): $(BUILD)/ide_bud.o $(BUILD)/ide_budtest.o $(HOST_OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(BUDBIN040): $(BUILD)/ide_bud_040.o $(BUILD)/ide_budtest_040.o $(HOST_OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
+
 check: $(ALLBIN)
 	./$(BIN)
 	./$(BIN040)
@@ -119,6 +143,8 @@ check: $(ALLBIN)
 	./$(DIAGBIN040)
 	./$(MODBIN)
 	./$(MODBIN040)
+	./$(BUDBIN)
+	./$(BUDBIN040)
 
 clean:
 	rm -rf $(BUILD)
