@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-13 — buddha 1.1.0-2: a stand-in match key for the 1.1 kernels (06ff3b0)
+
+`$match zorro:1212:2a,mobo:buddha` replaces `zorro:1212:00,zorro:1212:2a`, because the 1.1 kernels' module core refuses a product-00 key. The module is tagged by its imports (k30.1.2 / k46.1.2), so one object loads on the 1.1 kernels and on later ones; it builds with the 1.1 kits whose motherboard registry lists `buddha`. The key returns to `zorro:1212:00,zorro:1212:2a` when kernels with dlm core patch 0055 ship. Driver code and Gayle bytes are unchanged. buddha k30 d8bd5447 (15572 bytes), k46 aebd2d83 (16292 bytes).
+
 ## 2026-11-13 — `make -C module` builds buddha beside gayle (219dba3, 68d2bf8, e6f2d39)
 
 `buddha` is in the default target on both lines and needs kabi 1.5 kits (`k30.1.5` / `k46.1.5`), whose module core takes the match key `zorro:1212:00`; `gayle` still needs only kabi 1.2. `buddha` builds in its own `build/buddha/<line>`, so the two modules build in either order. The default `DLM` is `../amix/kernel/dlm`, with a standalone `../amix-dlm` still used where only that exists. buddha k30 13fa7fa4 (15580 bytes), k46 1a71a253 (16292 bytes); the static objects and `gayle` are unchanged.
