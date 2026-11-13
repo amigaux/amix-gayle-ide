@@ -1,0 +1,27 @@
+# buddha: its .moddata keys (amix-dlm C3-1 section 3, C4-2 section 1 and
+# section 8.2) and the definition line, as the ABI kit's mkmod reads a Master.
+# One Master for both lines: no $cpu, the kit's fragment gives the line's.
+# $class root: loaded by the core's root pass before the root is mounted; a
+# root-class module is never unloaded ($unload never).
+# $match: the Individual Computers Buddha (manufacturer 0x1212, product 0x00,
+# every revision) and Catweasel Z-II (product 0x2A); the core links the
+# module only when one of them is in the AutoConfig list.  buddha_load
+# finds the boards with autocon() and probes each port.
+# $rank ide: sd's class 4 (C4-1 section 4), the argument buddha_load passes
+# to sd_register, once per board.  No $majors: sd owns the disk majors.
+# $modtype misc: MOD_HDRV_WRAPPER, no switch-table slot.
+# Parameters: intr 1 = attach INT2 after the self-test (the default), 0 =
+# polled I/O; slave 1 = master and slave on every port (the default), 0 =
+# masters only, 2 = a slave only if it is an ATAPI device; debug 0..2.
+# The units are fixed: port 0 master 6, slave 5; port 1 3 and 2; port 2
+# (Catweasel Z-II) 1 and 0.
+$modtype misc
+$class root
+$match zorro:1212:00,zorro:1212:2a
+$rank ide
+$unload never
+$param intr:int:1:0:1
+$param slave:int:1:0:2
+$param debug:int:0:0:2
+$desc Buddha and Catweasel Z-II IDE, root-class disk controller
+buddha	buddha

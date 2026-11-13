@@ -1,10 +1,13 @@
 # module/Makefile -- the gayle root-class loadable module, one per kernel line,
 # built with amix-dlm's ABI kit (the kit's docs/guide.md; contracts C3-1, C4-1,
-# C4-2).
+# C4-2), and the buddha module (module/buddha, the Buddha / Catweasel
+# Z-II flavour of the same source).
 #
 #   make -C module            both lines: build/k30/mod.d/gayle and
 #                             build/k46/mod.d/gayle, each checked by the kit's
 #                             modfix and modcheck.py, and scanned for 0xDE1000
+#   make -C module buddha     both lines of buddha: build/k30/mod.d/buddha and
+#                             build/k46/mod.d/buddha, checked the same way
 #   make -C module k30        one line (or k46)
 #   make -C module static     the static object of each line compiled against
 #                             the kit's headers, and its sha256 (the static
@@ -34,6 +37,14 @@ all: $(LINES)
 $(LINES):
 	$(MAKE) KIT=$(call kit,$@) all nogayleid
 
+# buddha is not in `all' yet: the module core and the kit's modcheck refuse a
+# zorro match key whose product is 00 (amix-dlm C3-1 section 3), and the
+# Buddha's product is 0x00.
+buddha: $(LINES:%=buddha-%)
+
+$(LINES:%=buddha-%): buddha-%:
+	$(MAKE) -C buddha KIT=$(call kit,$*) all nogayleid
+
 static: $(LINES:%=static-%)
 
 $(LINES:%=static-%): static-%:
@@ -44,7 +55,7 @@ clean: $(LINES:%=clean-%)
 $(LINES:%=clean-%): clean-%:
 	$(MAKE) KIT=$(call kit,$*) clean
 
-.PHONY: all static clean $(LINES) $(LINES:%=static-%) $(LINES:%=clean-%)
+.PHONY: all static clean buddha $(LINES) $(LINES:%=static-%) $(LINES:%=clean-%) $(LINES:%=buddha-%)
 
 else	# one line, the kit's
 
