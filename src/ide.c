@@ -722,6 +722,7 @@ ulong	ide_atapi_irlate;	/* polled ATAPI ends accepted without IREASON CoD|IO */
  * ============================================================================ */
 struct ideboard	bud_ch[BUD_NCHAN];	/* base 0: no such port */
 int		bud_chok[BUD_NCHAN];	/* 1: a drive answered the port's readback */
+int		bud_master[BUD_NCHAN];	/* 1: the master answered it (else the slave alone) */
 ulong		bud_base[BUD_NBOARDS];	/* the boards' AutoConfig bases, 0: none */
 int		bud_nports[BUD_NBOARDS];
 int		bud_nboards;
@@ -828,6 +829,7 @@ bud_forget()
 		bud_ch[i].name = 0;
 		bud_ch[i].base = bud_ch[i].irqstat = bud_ch[i].irqack = bud_ch[i].irqena = 0;
 		bud_chok[i] = 0;
+		bud_master[i] = 0;
 	}
 	for (i = 0; i < BUD_NBOARDS; ++i) {
 		bud_base[i] = 0;
@@ -842,7 +844,9 @@ bud_forget()
 #define IDE_CHAN( drive)		ide_bd = &bud_ch[(drive) >> 1]
 #define IDE_DRV1( drive)		((drive) & 1 ? IDE_SDH_DRV1 : 0)
 #define IDE_IS_SLAVE( drive)		((drive) & 1)
-#define IDE_ATTACH_WANTED( drive)	(bud_chok[(drive) >> 1] && (!((drive) & 1) || ide_slave_enable))
+/* the master only where it answered the probe; a slave where slaves are wanted */
+#define IDE_ATTACH_WANTED( drive)	(bud_chok[(drive) >> 1] \
+					 && ((drive) & 1 ? ide_slave_enable : bud_master[(drive) >> 1]))
 #define IDE_CP_DRIVE( cp)		bud_cp_drive( cp)
 #define IDE_DRIVE_OF( c, cp)		bud_drive_of( c, cp)
 #define IDE_INTR_OTHERS()		bud_intr_others()
@@ -2779,11 +2783,13 @@ MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "Gayle IDE (A4000,
  *   2. the boards: autocon() for every Buddha (0x1212/0x00), then every
  *      Catweasel Z-II (0x1212/0x2A), at most four in all;
  *   3. each port (two on a Buddha, three on a Catweasel Z-II): bprobe() of
- *      its alternate status, then the task-file readback (on the 68030 line
+ *      its alternate status, then the task-file readback with the master
+ *      selected, and when that fails (and slave is not 0) with the slave
+ *      selected, for a drive jumpered as slave alone (on the 68030 line
  *      bprobe() catches no empty window; the readback is what the open bus
- *      cannot fake).  A port that does not answer is not touched again;
- *   4. the attach: polled IDENTIFY of the master of every answering port,
- *      and of its slave unless slave=0; every drive is left with nIEN set;
+ *      cannot fake).  A port where neither answers is not touched again;
+ *   4. the attach: polled IDENTIFY of the master where it answered, and of
+ *      the slave unless slave=0; every drive is left with nIEN set;
  *   5. sd_register(idequeue, b, board base, "Buddha IDE" or "Catweasel IDE",
  *      4), once per board with a drive, b the board's index here and the
  *      base its AutoConfig address, never a port's;
@@ -2795,11 +2801,13 @@ MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "Gayle IDE (A4000,
  *
  * buddha_defer() runs at the first sysinit, in process context at level 0:
  * intr_attach() at level 2, then a self-test on every port with a drive.
- * For each, the board's enable at 0xFC0 is written (once per board), nIEN
- * is cleared on that port alone and a command that interrupts is issued:
- * READ VERIFY SECTOR(S) of LBA 0 to an ATA drive, IDENTIFY PACKET DEVICE to
- * a port with only an ATAPI device (its data drained afterwards).  When
- * every port interrupted, nIEN is cleared on all of them: interrupt I/O.
+ * The drive tested is the port's master, or on a port with a slave alone
+ * that slave: both drive the port's one INTRQ line.  For each, the board's
+ * enable at 0xFC0 is written (once per board), nIEN is cleared on that port
+ * alone and a command that interrupts is issued: READ VERIFY SECTOR(S) of
+ * LBA 0 to an ATA drive, IDENTIFY PACKET DEVICE to an ATAPI one (its data
+ * drained afterwards).  When every port interrupted, nIEN is cleared on all
+ * of them: interrupt I/O.
  * Otherwise every drive keeps nIEN, the handler is detached and the driver
  * stays polled.  The enable cannot be taken back and need not be: with
  * nIEN set no drive drives INTRQ.
@@ -2813,6 +2821,62 @@ extern int	autocon();		/* (long pc, int n, long *base, long *size): 1 found */
 ulong	bud_extra_boards;		/* boards found beyond BUD_NBOARDS, not driven */
 static char	bud_name_buddha[] = "Buddha IDE";
 static char	bud_name_cwz2[]   = "Catweasel IDE";
+
+/*
+ * The slave's readback, for a port whose master did not answer: a single
+ * drive jumpered as slave (device 1) is a configuration the boards' ROM
+ * boots from.  ide_readback() with device 1 selected: the same alternating
+ * write/readback of NSECT and SECT, which an open or a charge-holding bus
+ * does not pass, BSY waited out once (bounded) if the status shows a drive
+ * still resetting.  It is asked only after the master failed, so no device 0
+ * is there to answer for an absent device 1 (ATA lets device 0 return
+ * device 1's registers): what holds the values is the slave itself.  The
+ * attach's IDENTIFY then confirms it, and the master is not addressed again.
+ * Leaves the port with nIEN set.
+ */
+static int
+bud_readback_slave( ch)
+struct ideboard	*ch;
+{
+	int	st, ok;
+
+	ide_bd = ch;
+	TW( IDE_REG_CONTROL, IDE_CTL_NIEN);
+	TW( IDE_REG_SDH, IDE_SDH_FIXED | IDE_SDH_LBA | IDE_SDH_DRV1);
+	ide_settle();
+	ok = ide_readback_regs();
+	if (!ok) {
+		st = TR( IDE_REG_ALTSTAT);
+		if (st != 0xFF && (st & IDE_ST_BSY)) {
+			st = ide_wait( IDE_ST_BSY, 0, ide_spins_reset);
+			if (st >= 0)
+				ok = ide_readback_regs();
+		}
+	}
+	ide_bd = 0;
+	return ok;
+}
+
+/*
+ * One port: present when its master answers the readback, or, with slaves
+ * wanted (slave=1 or 2), when its slave does.  bud_master[] says which.
+ */
+static void
+bud_probe_port( i)
+int	i;
+{
+	struct ideboard	*ch;
+
+	ch = &bud_ch[i];
+	if (bprobe( (caddr_t)(ch->base + IDE_REG_ALTSTAT), -1) != 0)
+		return;
+	if (ide_readback( ch)) {
+		bud_chok[i] = bud_master[i] = 1;
+		return;
+	}
+	if (ide_slave_enable && bud_readback_slave( ch))
+		bud_chok[i] = 1;
+}
 
 /* The boards of one product: their ports set up and probed. */
 static void
@@ -2840,8 +2904,7 @@ char	*name;
 			ch->irqstat = (ulong)base + BUD_IRQSTAT0 + BUD_IRQSTEP * p;
 			ch->irqack  = 0;
 			ch->irqena  = (ulong)base + BUD_INTENA;
-			if (bprobe( (caddr_t)(ch->base + IDE_REG_ALTSTAT), -1) == 0 && ide_readback( ch))
-				bud_chok[b * BUD_NPORTS + p] = 1;
+			bud_probe_port( b * BUD_NPORTS + p);
 		}
 	}
 }
