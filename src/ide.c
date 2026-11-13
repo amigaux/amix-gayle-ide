@@ -67,6 +67,14 @@
  * ide_push_n / ide_push_bytes counters.  A default build has none of them,
  * so the line operations cannot be switched off from kmem.
  *
+ * Built with -DIDE_BUDDHA (implies IDE_MODULE; make -C module, the second
+ * module) the same source is the root-class module `buddha': the Individual
+ * Computers Buddha and the Catweasel Z-II, Zorro II IDE boards found through
+ * the AutoConfig list.  Everything specific to them is in the sections marked
+ * BUDDHA; the shared code reaches the board through the macros those sections
+ * define (IDE_CHAN, IDE_DRV1, ...), which a Gayle build defines to exactly
+ * what it compiled before, so the static driver and `gayle' keep their bytes.
+ *
  * BOARD ABSTRACTION: every board-specific address and interrupt convention is
  * confined to `struct ideboard' and the ide_irq_*() / ide_detect() helpers
  * below.  The rest of the driver sees a task-file base and three interrupt
@@ -77,6 +85,9 @@
  * -include mock_regs.h).  Without HOST_TEST the macros are plain volatile
  * dereferences.
  */
+#if IDE_BUDDHA && !defined(IDE_MODULE)
+#define IDE_MODULE	1		/* the Buddha back end exists only as a module */
+#endif
 #include	"sys/param.h"		/* HZ */
 #include	"sys/types.h"
 #include	"sys/errno.h"
@@ -114,7 +125,11 @@ extern void	(*int2_tbl[])();	/* master.d/kernel.c, NULL terminated */
  * checks at attach (see "68040/68060 data cache" below).
  */
 /* Base addresses live in the board table (struct ideboard) -- never here. */
+#if IDE_BUDDHA	/* BUDDHA: the control block lies 0x11A above a port's base */
+#define IDE_SPAN	0x011BL
+#else
 #define IDE_SPAN	0x101BL		/* bytes from a task-file base to the last register + 1 */
+#endif
 
 #define IDE_REG_DATA	0x0000		/* R/W 16 bit */
 #define IDE_REG_ERROR	0x0006		/* R          */
@@ -126,8 +141,13 @@ extern void	(*int2_tbl[])();	/* master.d/kernel.c, NULL terminated */
 #define IDE_REG_SDH	0x001A		/* R/W drive/head     / LBA 27:24 */
 #define IDE_REG_STATUS	0x001E		/* R   (clears INTRQ) */
 #define IDE_REG_COMMAND	0x001E		/*   W                */
+#if IDE_BUDDHA	/* BUDDHA: CS1 register 6, 0x100 + 2 + 6 * 4 above the port */
+#define IDE_REG_ALTSTAT	0x011A
+#define IDE_REG_CONTROL	0x011A
+#else
 #define IDE_REG_ALTSTAT	0x101A		/* R   (does not clear INTRQ) */
 #define IDE_REG_CONTROL	0x101A		/*   W device control */
+#endif
 
 /* the same registers under their ATAPI names (ATA/ATAPI-4 9.10) */
 #define IDE_REG_IREASON	IDE_REG_NSECT	/* R   interrupt reason */
@@ -527,6 +547,7 @@ struct ideboard {
 	int	aga;		/* 1: AGA chipset expected, 0: OCS/ECS */
 };
 
+#if !IDE_BUDDHA	/* BUDDHA: no fixed rows; the ports come from the AutoConfig list */
 static struct ideboard	ideboards[] = {
 	{ "A4000 IDE", 0xDD2020L, 0xDD3020L, 0L,        0L,        0x00, 1 },
 	{ "A1200 IDE", 0xDA0000L, 0xDA9000L, 0xDA9000L, 0xDAA000L, 0xD1, 1 },
@@ -535,6 +556,7 @@ static struct ideboard	ideboards[] = {
 #endif
 };
 #define IDE_NBOARDS	((int)(sizeof ideboards / sizeof ideboards[0]))
+#endif
 #define IDE_GAYLE_ID	0xDE1000L
 #define IDE_IRQ_BIT	0x80
 
@@ -576,6 +598,10 @@ struct ideboard	*bd;
 	}
 }
 
+#if IDE_BUDDHA
+static void	bud_irq_enable();	/* BUDDHA: the board's write-once enable */
+#define ide_irq_enable( bd, on)	bud_irq_enable( (bd), (on))
+#else
 static void
 ide_irq_enable( bd, on)
 struct ideboard	*bd;
@@ -588,6 +614,7 @@ int		on;
 		WB( bd->irqena, on ? (v | IDE_IRQ_BIT) : (v & ~IDE_IRQ_BIT));
 	}
 }
+#endif
 
 #ifndef IDE_MODULE
 static uint
@@ -606,7 +633,46 @@ ide_gayle_id()
 
 /* ------------------------------------------------------------ unit state */
 
+#if IDE_BUDDHA
+/* ============================================================================
+ * BUDDHA: the boards (Individual Computers' register specification, as the
+ * Linux kernel carries it in Documentation/arch/m68k/buddha-driver.rst, and
+ * Linux pata_buddha.c; the WinUAE/Amiberry Buddha model agrees).
+ *
+ *   AutoConfig  Zorro II, 64 KB, manufacturer 0x1212; product 0x00 Buddha
+ *               (two ports), 0x2A Catweasel Z-II (three ports).
+ *   port p      task file at board + 0x800 + 0x200 * p: DATA at the base,
+ *               register n at + 2 + 4 * n (as the Gayle's); alternate
+ *               status / device control at + 0x11A.
+ *   IRQ status  board + 0xF00 + 0x40 * p, read only, bit 7 = the port's
+ *               INTRQ line (a level, not a latch: reading the drive's STATUS
+ *               drops it, nothing to acknowledge).
+ *   IRQ enable  board + 0xFC0, write only: any write lets the ports reach
+ *               INT2, and nothing but a reset takes it back.  So a drive is
+ *               kept quiet with nIEN, never at the board.
+ *
+ * The driver writes nothing else on the board.  Below 0x800 lie the
+ * AutoConfig space and the speed register (the AmigaOS driver's setting is
+ * kept), 0xE00-0xEFF is the clock port, and from 0x1000 up the ROM (a flash
+ * chip on the Buddha Flash): none of it is read or written.
+ * ============================================================================ */
+#define BUD_MANUF	0x1212L		/* Individual Computers */
+#define BUD_PC_BUDDHA	0x12120000L	/* autocon(): manufacturer << 16 | product */
+#define BUD_PC_CWZ2	0x1212002AL
+#define BUD_NBOARDS	4		/* sd's four cards */
+#define BUD_NPORTS	3		/* per board, the Catweasel Z-II's */
+#define BUD_NCHAN	(BUD_NBOARDS * BUD_NPORTS)
+#define BUD_PORT0	0x800L
+#define BUD_PORTSTEP	0x200L
+#define BUD_IRQSTAT0	0xF00L
+#define BUD_IRQSTEP	0x40L
+#define BUD_INTENA	0xFC0L
+
+/* drive index d: board d / 6, port (d / 2) % 3, slave d & 1; channel d / 2 */
+#define IDE_NDRIVES	(BUD_NCHAN * 2)
+#else
 #define IDE_NDRIVES	2
+#endif
 #define IDE_MODEL_LEN	40
 
 struct ideunit {
@@ -645,6 +711,152 @@ ulong	ide_resets;		/* software resets issued after a timeout */
 ulong	ide_atapi_cmds;		/* ATAPI packet commands issued */
 ulong	ide_atapi_overrun;	/* ATAPI bytes the drive sent beyond nbyte (dropped) */
 ulong	ide_atapi_irlate;	/* polled ATAPI ends accepted without IREASON CoD|IO */
+
+#if IDE_BUDDHA
+/* ============================================================================
+ * BUDDHA: the channel table.  One `struct ideboard' per port, whose base is
+ * the port's task file; ide_bd points at the port of the command on the
+ * cable.  One command is in flight across all boards and ports, so the
+ * queue, ide_x and the watchdog stay as they are and only the port changes
+ * per command: ide_select() switches ide_bd to the drive's port (IDE_CHAN).
+ * ============================================================================ */
+struct ideboard	bud_ch[BUD_NCHAN];	/* base 0: no such port */
+int		bud_chok[BUD_NCHAN];	/* 1: a drive answered the port's readback */
+ulong		bud_base[BUD_NBOARDS];	/* the boards' AutoConfig bases, 0: none */
+int		bud_nports[BUD_NBOARDS];
+int		bud_nboards;
+ulong		bud_intr_other;		/* INTRQs dropped on a port with no command */
+static int	bud_intron[BUD_NBOARDS];	/* the enable at 0xFC0 written */
+static int	bud_cardbd[4];		/* sd card -> board index, learnt in idequeue() */
+
+/* SCSI units per port, master and slave; 4 and 7 are not used */
+static int	bud_unit[BUD_NPORTS][2] = { { 6, 5 }, { 3, 2 }, { 1, 0 } };
+
+/* SCSI unit of board b -> drive index, or -1 when no port answers to it */
+static int
+bud_drive( b, unit)
+int	b;
+uint	unit;
+{
+	int	p, s;
+
+	if (b < 0 || b >= BUD_NBOARDS)
+		return -1;
+	for (p = 0; p < BUD_NPORTS; ++p)
+		for (s = 0; s < 2; ++s)
+			if ((int)unit == bud_unit[p][s])
+				return (b * BUD_NPORTS + p) * 2 + s;
+	return -1;
+}
+
+/* idequeue(c, cp): `c' is the board's index (sd_register's); keep it per card */
+static int
+bud_drive_of( c, cp)
+int		c;
+struct sdcom	*cp;
+{
+	if (c >= 0 && c < BUD_NBOARDS)
+		bud_cardbd[cp->card & 3] = c;
+	return bud_drive( c, cp->unit);
+}
+
+/* a queued request's drive: its card's board, as idequeue() saw it */
+static int
+bud_cp_drive( cp)
+struct sdcom	*cp;
+{
+	return bud_drive( bud_cardbd[cp->card & 3], cp->unit);
+}
+
+/* The board's enable at 0xFC0: written once, and only to turn it on. */
+static void
+bud_irq_enable( bd, on)
+struct ideboard	*bd;
+int		on;
+{
+	int	b;
+
+	b = (bd - bud_ch) / BUD_NPORTS;
+	if (on && bd->irqena && !bud_intron[b]) {
+		bud_intron[b] = 1;
+		WB( bd->irqena, 0);
+	}
+}
+
+/* Device control (nIEN) on every port that answered. */
+static void
+bud_ctl_all( v)
+int	v;
+{
+	int	i;
+
+	for (i = 0; i < BUD_NCHAN; ++i)
+		if (bud_chok[i])
+			WB( bud_ch[i].base + IDE_REG_CONTROL, v);
+}
+
+/*
+ * ideintr() serves the port of the command on the cable.  A drive on another
+ * port that holds INTRQ (nothing should, but the line is a level on a shared
+ * INT2) would keep the interrupt asserted for ever: read its STATUS to drop it.
+ */
+static void
+bud_intr_others()
+{
+	int	i;
+
+	if (ide_state != 2)
+		return;
+	for (i = 0; i < BUD_NCHAN; ++i) {
+		if (!bud_chok[i] || &bud_ch[i] == ide_bd)
+			continue;
+		if (RB( bud_ch[i].irqstat) & IDE_IRQ_BIT) {
+			IDE_SYNC();
+			(void) RB( bud_ch[i].base + IDE_REG_STATUS);
+			bud_intr_other++;
+		}
+	}
+}
+
+/* Forget the boards (idereset). */
+static void
+bud_forget()
+{
+	int	i;
+
+	for (i = 0; i < BUD_NCHAN; ++i) {
+		bud_ch[i].name = 0;
+		bud_ch[i].base = bud_ch[i].irqstat = bud_ch[i].irqack = bud_ch[i].irqena = 0;
+		bud_chok[i] = 0;
+	}
+	for (i = 0; i < BUD_NBOARDS; ++i) {
+		bud_base[i] = 0;
+		bud_nports[i] = 0;
+		bud_intron[i] = 0;
+	}
+	for (i = 0; i < 4; ++i)
+		bud_cardbd[i] = 0;
+	bud_nboards = 0;
+}
+
+#define IDE_CHAN( drive)		ide_bd = &bud_ch[(drive) >> 1]
+#define IDE_DRV1( drive)		((drive) & 1 ? IDE_SDH_DRV1 : 0)
+#define IDE_IS_SLAVE( drive)		((drive) & 1)
+#define IDE_ATTACH_WANTED( drive)	(bud_chok[(drive) >> 1] && (!((drive) & 1) || ide_slave_enable))
+#define IDE_CP_DRIVE( cp)		bud_cp_drive( cp)
+#define IDE_DRIVE_OF( c, cp)		bud_drive_of( c, cp)
+#define IDE_INTR_OTHERS()		bud_intr_others()
+#define IDE_RESET_EXTRA()		bud_forget()
+#else	/* the Gayle: one port, drive 0 the master, 1 the slave */
+#define IDE_CHAN( drive)
+#define IDE_DRV1( drive)		(drive ? IDE_SDH_DRV1 : 0)
+#define IDE_IS_SLAVE( drive)		(drive == 1)
+#define IDE_ATTACH_WANTED( drive)	(drive == 0 || ide_slave_enable)
+#define IDE_CP_DRIVE( cp)		((int)cp->unit == ide_master_unit ? 0 : 1)
+#define IDE_DRIVE_OF( c, cp)		ide_drive_of( cp->unit)
+#define IDE_INTR_OTHERS()
+#define IDE_RESET_EXTRA()
+#endif
 
 /* --------------------------------------------------- low-level helpers */
 
@@ -717,7 +929,8 @@ static int
 ide_select( drive)
 int	drive;
 {
-	TW( IDE_REG_SDH, IDE_SDH_FIXED | IDE_SDH_LBA | (drive ? IDE_SDH_DRV1 : 0));
+	IDE_CHAN( drive);
+	TW( IDE_REG_SDH, IDE_SDH_FIXED | IDE_SDH_LBA | IDE_DRV1( drive));
 	ide_settle();
 	return ide_wait( IDE_ST_BSY, 0, ide_spins);
 }
@@ -905,8 +1118,12 @@ int	drive;
 			printf( "ide%d: no drive\n", drive);
 		return;
 	}
-	if (drive == 1 && ide_slave_enable == 2) {
+	if (IDE_IS_SLAVE( drive) && ide_slave_enable == 2) {
+#if IDE_BUDDHA
+		printf( "ide%d: ATA device on a slave ignored (slave=2: ATAPI only)\n", drive);
+#else
 		printf( "ide1: ATA device on the slave ignored (ide_slave_enable 2: ATAPI only)\n");
+#endif
 		return;
 	}
 	if (!(id[IDE_ID_CAPS] & IDE_ID_CAPS_LBA)) {
@@ -952,7 +1169,7 @@ ide_attach()
 #endif
 	TW( IDE_REG_CONTROL, IDE_CTL_NIEN);		/* quiet during the polled attach */
 	for (drive = 0; drive < IDE_NDRIVES; ++drive)
-		if (drive == 0 || ide_slave_enable)
+		if (IDE_ATTACH_WANTED( drive))
 			ide_attach_unit( drive);
 		else
 			ideunits[drive].present = FALSE;
@@ -1011,7 +1228,7 @@ ulong	lba, n;
 	TW( IDE_REG_LCYL, (lba >> 8) & 0xFF);
 	TW( IDE_REG_HCYL, (lba >> 16) & 0xFF);
 	TW( IDE_REG_SDH,   IDE_SDH_FIXED | IDE_SDH_LBA
-			 | (drive ? IDE_SDH_DRV1 : 0) | ((lba >> 24) & IDE_SDH_HEAD));
+			 | IDE_DRV1( drive) | ((lba >> 24) & IDE_SDH_HEAD));
 	TW( IDE_REG_COMMAND, cmd);
 	ide_settle();
 }
@@ -1603,8 +1820,8 @@ ide_start()
 		return;
 	ide_active = cp;
 	ide_x.gen++;
-	if (ideunits[(int)cp->unit == ide_master_unit ? 0 : 1].atapi) {
-		ide_atapi_setup( cp, (int)cp->unit == ide_master_unit ? 0 : 1);
+	if (ideunits[IDE_CP_DRIVE( cp)].atapi) {
+		ide_atapi_setup( cp, IDE_CP_DRIVE( cp));
 		if (ide_atapi_issue() < 0)
 			ide_finish( -1);
 		else
@@ -1629,7 +1846,7 @@ ide_start()
 			   | ((ulong)cp->cdb[4] << 8)  | cp->cdb[5];
 		ide_x.left = ((ulong)cp->cdb[7] << 8) | cp->cdb[8];
 	}
-	ide_x.drive = (int)cp->unit == ide_master_unit ? 0 : 1;
+	ide_x.drive = IDE_CP_DRIVE( cp);
 	ide_x.u     = &ideunits[ide_x.drive];
 	ide_x.data  = (uchar *)cp->addr;
 	ide_x.nbyte = cp->nbyte;
@@ -1647,6 +1864,7 @@ ideintr()
 {
 	int	st, i;
 
+	IDE_INTR_OTHERS();
 	if (ide_bd == 0 || ide_state != 2 || !ide_irq_pending( ide_bd))
 		return;
 	st = TR( IDE_REG_STATUS);		/* drops INTRQ at the drive */
@@ -1753,6 +1971,7 @@ uint	n;
 		*d++ = 0;
 }
 
+#if !IDE_BUDDHA	/* BUDDHA: bud_drive_of() */
 /* SCSI unit -> drive index (0 master, 1 slave), or -1 when nothing is mapped. */
 static int
 ide_drive_of( unit)
@@ -1764,6 +1983,7 @@ uint	unit;
 		return 1;
 	return -1;
 }
+#endif
 
 /*
  * The host-adapter queue entry: execute cp->cdb for cp->unit and complete.
@@ -1799,7 +2019,7 @@ struct sdcom	*cp;
 		ide_attach();
 	ide_cache_push( (ulong)cp->addr, (ulong)cp->nbyte);	/* before the CPU reads or fills it */
 
-	drive = ide_drive_of( cp->unit);
+	drive = IDE_DRIVE_OF( c, cp);
 	data  = (uchar *)cp->addr;
 	op    = cp->cdb[0];
 	cp->status = SC_GOOD;
@@ -2157,6 +2377,7 @@ idereset()
 	ide_watch_ticks = 0;
 	for (i = 0; i < IDE_NDRIVES; ++i)
 		ideunits[i].present = FALSE;
+	IDE_RESET_EXTRA();
 }
 
 #ifdef IDE_MODULE
@@ -2236,14 +2457,18 @@ extern int	wakeup();
 ulong	ide_halted;			/* the halt pass ran (count) */
 ulong	ide_selftest;			/* 0 not run, 1 passed (interrupt I/O), 2 failed (polled) */
 ulong	ide_selftest_ticks;		/* clock ticks the self-test waited */
+#if !IDE_BUDDHA
 int	ide_board;			/* param board: 0 auto, 1 A4000, 2 A1200, -1 never probe */
 int	ide_cardres = -1;		/* the ROM walk: -1 not run, 0 no card.resource, 1 found */
 ulong	ide_romtags;			/* resident tags the ROM walk passed */
+#endif
 static char	ide_st_chan;		/* the self-test's sleep channel */
 
+#if !IDE_BUDDHA
 #define IDE_BD_A4000	0		/* ideboards[] rows; board=N takes row N-1 */
 #define IDE_BD_A1200	1
 #define IDE_NBD_MODULE	2
+#endif
 
 /*
  * One integer parameter from the string the core passes to the load entry:
@@ -2290,6 +2515,7 @@ int	dflt, lo, hi;
 	return (int)v;
 }
 
+#if !IDE_BUDDHA	/* the Gayle's module entries; BUDDHA's are below */
 /*
  * Does the Kickstart ROM carry card.resource among its resident modules?
  * That is how the module tells an A1200 from an A4000, both AGA, without a
@@ -2533,4 +2759,305 @@ gayle_halt()
 /* unload=never: a root-class module is pinned */
 MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "Gayle IDE (A4000, A1200)");
 #endif
+#endif	/* !IDE_BUDDHA */
+
+#if IDE_BUDDHA
+/* ============================================================================
+ * BUDDHA: the module form, `buddha' (amix-dlm contracts C4-2 version 10
+ * section 8.2, C4-1 version 9).  module/Master.buddha gives the .moddata:
+ * class=root, match=zorro:1212:00,zorro:1212:2a, rank=ide, unload=never, no
+ * majors.  The core links the module only when such a board is in the
+ * AutoConfig list, on any Amiga: there is no chipset or Kickstart gate.
+ *
+ * buddha_load() runs in the root pass, at level 7 with the clock stopped
+ * (see the Gayle's block above for what that rules out).  In order:
+ *   1. the parameters: intr (1: interrupts after the self-test), slave
+ *      (1: master and slave on every port; 0 masters only; 2 slaves only if
+ *      ATAPI), debug (0);
+ *   2. the boards: autocon() for every Buddha (0x1212/0x00), then every
+ *      Catweasel Z-II (0x1212/0x2A), at most four in all;
+ *   3. each port (two on a Buddha, three on a Catweasel Z-II): bprobe() of
+ *      its alternate status, then the task-file readback (on the 68030 line
+ *      bprobe() catches no empty window; the readback is what the open bus
+ *      cannot fake).  A port that does not answer is not touched again;
+ *   4. the attach: polled IDENTIFY of the master of every answering port,
+ *      and of its slave unless slave=0; every drive is left with nIEN set;
+ *   5. sd_register(idequeue, b, board base, "Buddha IDE" or "Catweasel IDE",
+ *      4), once per board with a drive, b the board's index here and the
+ *      base its AutoConfig address, never a port's;
+ *   6. with intr=1, root_defer(buddha_defer, 0).
+ * No board, no answering port, or no drive: ENXIO, silent.
+ *
+ * The units are fixed per port and drive (bud_unit[]): port 0 master 6,
+ * slave 5; port 1 3 and 2; port 2 (Catweasel Z-II) 1 and 0.
+ *
+ * buddha_defer() runs at the first sysinit, in process context at level 0:
+ * intr_attach() at level 2, then a self-test on every port with a drive.
+ * For each, the board's enable at 0xFC0 is written (once per board), nIEN
+ * is cleared on that port alone and a command that interrupts is issued:
+ * READ VERIFY SECTOR(S) of LBA 0 to an ATA drive, IDENTIFY PACKET DEVICE to
+ * a port with only an ATAPI device (its data drained afterwards).  When
+ * every port interrupted, nIEN is cleared on all of them: interrupt I/O.
+ * Otherwise every drive keeps nIEN, the handler is detached and the driver
+ * stays polled.  The enable cannot be taken back and need not be: with
+ * nIEN set no drive drives INTRQ.
+ *
+ * buddha_halt() sets nIEN on every drive; buddha_unload() does too and
+ * forgets the boards.
+ * ========================================================================= */
+
+extern int	autocon();		/* (long pc, int n, long *base, long *size): 1 found */
+
+ulong	bud_extra_boards;		/* boards found beyond BUD_NBOARDS, not driven */
+static char	bud_name_buddha[] = "Buddha IDE";
+static char	bud_name_cwz2[]   = "Catweasel IDE";
+
+/* The boards of one product: their ports set up and probed. */
+static void
+bud_find( pc, nports, name)
+long	pc;
+int	nports;
+char	*name;
+{
+	struct ideboard	*ch;
+	long		base, size;
+	int		n, b, p;
+
+	for (n = 0; autocon( pc, n, &base, &size); ++n) {
+		if (bud_nboards >= BUD_NBOARDS) {
+			bud_extra_boards++;
+			continue;
+		}
+		b = bud_nboards++;
+		bud_base[b]   = (ulong)base;
+		bud_nports[b] = nports;
+		for (p = 0; p < nports; ++p) {
+			ch = &bud_ch[b * BUD_NPORTS + p];
+			ch->name    = name;
+			ch->base    = (ulong)base + BUD_PORT0 + BUD_PORTSTEP * p;
+			ch->irqstat = (ulong)base + BUD_IRQSTAT0 + BUD_IRQSTEP * p;
+			ch->irqack  = 0;
+			ch->irqena  = (ulong)base + BUD_INTENA;
+			if (bprobe( (caddr_t)(ch->base + IDE_REG_ALTSTAT), -1) == 0 && ide_readback( ch))
+				bud_chok[b * BUD_NPORTS + p] = 1;
+		}
+	}
+}
+
+/* Has board b a drive the attach found? */
+static int
+bud_has_drive( b)
+int	b;
+{
+	int	d;
+
+	for (d = b * BUD_NPORTS * 2; d < (b + 1) * BUD_NPORTS * 2; ++d)
+		if (ideunits[d].present)
+			return 1;
+	return 0;
+}
+
+/* The level-2 entry: "ours" when ideintr() took an interrupt on any port. */
+static int
+bud_intr2( arg)
+char	*arg;
+{
+	ulong	before, other;
+
+	before = ide_intr_count;
+	other  = bud_intr_other;
+	ideintr();
+	return ide_intr_count != before || bud_intr_other != other;
+}
+
+/*
+ * The self-test of port i (process context, level 0, the queue idle).
+ * Returns 0 when the port's drive interrupted, -1 when it did not, 1 when
+ * the port has no drive to ask.  nIEN is set again before it returns.
+ */
+static int
+bud_selftest_port( i)
+int	i;
+{
+	struct ideunit	*u;
+	ulong		before, t;
+	int		d, s, st, n, ok;
+
+	d = i * 2;
+	if (!ideunits[d].present)
+		d++;
+	if (!ideunits[d].present)
+		return 1;
+	u = &ideunits[d];
+	s = sdspl();
+	st = ide_select( d);			/* ide_bd is now port i */
+	if (st < 0 || (!u->atapi && !(st & IDE_ST_DRDY))) {
+		splx( s);
+		return -1;
+	}
+	before = ide_intr_count;
+	ide_st_armed = 1;
+	ide_irq_enable( ide_bd, 1);		/* the board's enable, once */
+	TW( IDE_REG_CONTROL, 0);		/* nIEN clear on this port only */
+	if (u->atapi) {
+		TW( IDE_REG_COMMAND, IDE_CMD_PIDENTIFY);
+		ide_settle();
+	} else
+		ide_program( d, IDE_CMD_VERIFY, 0L, 1L);
+	for (t = 0; ide_intr_count == before && t < ide_timeout_secs * HZ; ++t) {
+		/* one tick; at sdspl, so the wakeup cannot come before the sleep */
+		timeout( wakeup, (caddr_t)&ide_st_chan, 1);
+		(void) sleep( (caddr_t)&ide_st_chan, PRIBIO);
+	}
+	ide_st_armed = 0;
+	ide_selftest_ticks += t;
+	ok = ide_intr_count != before;
+	TW( IDE_REG_CONTROL, IDE_CTL_NIEN);
+	if (u->atapi) {				/* IDENTIFY PACKET DEVICE's data */
+		st = ide_wait_drq( ide_spins);
+		if (st >= 0 && (st & IDE_ST_DRQ))
+			for (n = 0; n < IDE_SECTOR / 2; ++n)
+				(void) TRW();
+	}
+	st = ide_wait( IDE_ST_BSY, 0, ide_spins);	/* the command's end, polled */
+	if (st < 0)
+		ide_reset_drive();
+	splx( s);
+	return ok ? 0 : -1;
+}
+
+/* Every port with a drive must interrupt; then interrupt I/O on all. */
+static int
+bud_selftest()
+{
+	int	i, r, n, s;
+
+	n = 0;
+	for (i = 0; i < BUD_NCHAN; ++i) {
+		if (!bud_chok[i])
+			continue;
+		r = bud_selftest_port( i);
+		if (r < 0) {
+			if (ide_debug)
+				printf( "buddha: port %d of board %d did not interrupt\n",
+					i % BUD_NPORTS, i / BUD_NPORTS);
+			return -1;
+		}
+		if (r == 0)
+			n++;
+	}
+	if (n == 0)
+		return -1;
+	s = sdspl();
+	ide_use_intr = 1;
+	bud_ctl_all( 0);			/* nIEN clear: the drives may assert INTRQ */
+	splx( s);
+	return 0;
+}
+
+/* The deferred call (root_defer): attach the interrupt, self-test, decide. */
+static int
+buddha_defer( arg)
+char	*arg;
+{
+	int	e;
+
+	e = intr_attach( IDE_LEVEL, bud_intr2, (char *)0, "buddha");
+	if (e) {
+		ide_selftest = 2;
+		printf( "buddha: intr_attach failed (errno %d), polled I/O\n", e);
+		return 0;
+	}
+	if (bud_selftest() == 0) {
+		ide_selftest = 1;
+		printf( "buddha: interrupt I/O\n");
+		return 0;
+	}
+	ide_selftest = 2;
+	bud_ctl_all( IDE_CTL_NIEN);
+	(void) intr_detach( IDE_LEVEL, bud_intr2, (char *)0);
+	printf( "buddha: interrupt self-test failed, polled I/O\n");
+	return 0;
+}
+
+/* The load entry, in the root pass (see the block comment above). */
+int
+buddha_load( params)
+char	*params;
+{
+	int	b, i, e, nreg;
+
+	ide_intr_enable  = gayle_iparam( params, "intr", 1, 0, 1);
+	ide_slave_enable = gayle_iparam( params, "slave", 1, 0, 2);
+	ide_debug        = gayle_iparam( params, "debug", 0, 0, 2);
+
+	idereset();
+	bud_extra_boards = 0;
+	bud_find( BUD_PC_BUDDHA, 2, bud_name_buddha);
+	bud_find( BUD_PC_CWZ2, 3, bud_name_cwz2);
+	for (i = 0; i < BUD_NCHAN; ++i)
+		if (bud_chok[i])
+			break;
+	if (i == BUD_NCHAN) {
+		idereset();
+		return ENXIO;
+	}
+	ide_bd = &bud_ch[i];
+	ide_state = 2;
+	ide_attach();
+	nreg = 0;
+	for (b = 0; b < bud_nboards; ++b) {
+		if (!bud_has_drive( b))
+			continue;
+		e = sd_register( idequeue, (uint)b, (char *)bud_base[b],
+				 bud_ch[b * BUD_NPORTS].name, IDE_SD_RANK);
+		if (e) {		/* the core undoes the earlier registrations */
+			printf( "buddha: sd_register failed (errno %d)\n", e);
+			bud_ctl_all( IDE_CTL_NIEN);
+			idereset();
+			return e;
+		}
+		nreg++;
+		printf( "buddha: %s at 0x%x, polled I/O\n", bud_ch[b * BUD_NPORTS].name,
+			(int)bud_base[b]);
+	}
+	if (nreg == 0) {
+		idereset();
+		return ENXIO;
+	}
+	if (bud_extra_boards)
+		printf( "buddha: %d more board(s) found, not driven\n", (int)bud_extra_boards);
+	if (ide_intr_enable) {
+		e = root_defer( buddha_defer, (char *)0);
+		if (e)
+			printf( "buddha: root_defer failed (errno %d), polled I/O\n", e);
+	}
+	return 0;
+}
+
+/*
+ * The core calls this only when a load fails after buddha_load() returned 0:
+ * mask the drives and forget the boards.
+ */
+int
+buddha_unload()
+{
+	bud_ctl_all( IDE_CTL_NIEN);
+	idereset();
+	return 0;
+}
+
+/* The halt pass: nIEN on every drive.  No flush, no wait. */
+void
+buddha_halt()
+{
+	ide_halted++;
+	bud_ctl_all( IDE_CTL_NIEN);
+}
+
+#ifndef HOST_TEST
+/* unload=never: a root-class module is pinned */
+MOD_HDRV_WRAPPER(buddha, buddha_load, buddha_unload, buddha_halt, "Buddha and Catweasel Z-II IDE");
+#endif
+#endif	/* IDE_BUDDHA */
 #endif	/* IDE_MODULE */
