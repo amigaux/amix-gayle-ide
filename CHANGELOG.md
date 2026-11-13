@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-13 — buddha 1.1.0-3 attaches a drive jumpered as slave alone on a port (59ad012..4ec4a51)
+
+A port counts as present when its master answers the probe, or, when the master does not and `slave` is not 0, when its slave does; the master is addressed only where it answered. The interrupt self-test runs on that slave. The host mock models what an absent device reads as and device 0 answering for an absent device 1; ide_budtest has 411 checks per line. The Gayle objects are unchanged. buddha k30 dfe2b2ab (15884 bytes), k46 444a64b3 (16604 bytes).
+
 ## 2026-11-13 — buddha 1.1.0-2: a stand-in match key for the 1.1 kernels (06ff3b0)
 
 `$match zorro:1212:2a,mobo:buddha` replaces `zorro:1212:00,zorro:1212:2a`, because the 1.1 kernels' module core refuses a product-00 key. The module is tagged by its imports (k30.1.2 / k46.1.2), so one object loads on the 1.1 kernels and on later ones; it builds with the 1.1 kits whose motherboard registry lists `buddha`. The key returns to `zorro:1212:00,zorro:1212:2a` when kernels with dlm core patch 0055 ship. Driver code and Gayle bytes are unchanged. buddha k30 d8bd5447 (15572 bytes), k46 aebd2d83 (16292 bytes).
