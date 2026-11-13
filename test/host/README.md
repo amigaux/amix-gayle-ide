@@ -92,3 +92,17 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   `sd_register` and `root_defer` errors; `_halt` (nIEN, no command) and `_unload`; and **no access
   to the Gayle ID register `0xDE1000` on any module path** (`mock_id_reads` + `mock_id_writes`
   summed over every case), and none of the diagnostic-build symbols.
+- The Buddha / Catweasel Z-II module (`-DIDE_MODULE -DIDE_BUDDHA`, `ide_budtest` and
+  `ide_budtest_040`, from `ide_budtest.c`, which mocks `autocon` beside the module form's kernel
+  calls) against the mock's Buddha boards (`MOCK_BOARD_BUDDHA`: one cable of two drives per port,
+  the Gayle being cable 0; any access a board does not allow is counted in `mock_bud_forbidden`):
+  discovery (`autocon` for 0x12120000, then 0x1212002A; no board, no answering port or no drive is a
+  silent `ENXIO`; no chipset or ROM gate); `bprobe` of each port's alternate status (board + 0x91A,
+  0xB1A, and 0xD1A on a Catweasel Z-II), a faulting port left alone; units 6/5, 3/2, 1/0 reaching
+  their port and drive for reads and writes, 4 and 7 unused; one `sd_register` per board with its
+  index and AutoConfig base, two boards each reached through its own card, polled and interrupt
+  driven; ATAPI on a port's slave and alone on a port; the self-test (the enable written once per
+  board, every port with a drive tested, nIEN cleared on all on a pass, kept on all with the handler
+  detached when a port stays silent or `intr_attach` refuses); a stray INTRQ on an idle port dropped;
+  parameters and `sd_register`/`root_defer` errors; `_halt` and `_unload`; and no access outside the
+  allowed registers in any case (the mock's own counting checked first).

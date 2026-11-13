@@ -9,7 +9,8 @@
 
 A native **Amiga UNIX (Amix 2.1, Commodore's SVR4.0 port to the 68030 Amiga)** driver for the
 **Gayle IDE controller** built into the Amiga 4000 (the loadable module also drives the A1200's port;
-the static driver's A1200/A600 rows are untested), so that Amix runs on an **unmodified A4000 with a 68030 CPU card** — no SCSI host adapter needed,
+the static driver's A1200/A600 rows are untested; a second module, `buddha`, drives the Individual
+Computers Buddha and Catweasel Z-II Zorro II IDE boards), so that Amix runs on an **unmodified A4000 with a 68030 CPU card** — no SCSI host adapter needed,
 root on a CF card. Amix shipped with no IDE driver at all; this repo closes that gap. It follows
 the framework, build environment and gotcha catalog of [`amix-a4091`](https://github.com/jusii/amix-a4091)
 and [`amix-z3660scsi`](https://github.com/jusii/amix-z3660scsi).
@@ -86,11 +87,14 @@ phantom A3000 SCSI controller on AGA machines, which makes the IDE port **card 0
 ```
 driver.conf               0xFFFF1DE0 idequeue "A4000 IDE" ide.c probe=idepresent
 src/ide.c                 the driver: register map, board table, probe, SCSI→ATA translation,
-                          level-2 handler (K&R C, single file as amix-kerntools expects)
+                          level-2 handler (K&R C, single file as amix-kerntools expects); the
+                          Buddha back end in the sections marked BUDDHA
+src/buddha.c              selects the Buddha flavour of ide.c (the buddha module's source)
 src/kernel-patches/       kernel.c.patch  -- ideintr into int2_tbl[] (master.d/kernel.c)
                           NOTICE          -- diffs only, not Amix source; the support.c patch
                                              (phantom A3000 SCSI removal) comes from amix-a4091
 module/                   the loadable module form: Makefile (ABI kit), Master, VERSION
+module/buddha/            the buddha module: Makefile, Master, VERSION
 test/host/                host harness: mock Gayle/ATA, kernel stubs, tests (make check)
 docs/                     decision record, VPOSR AGA-gate finding, the module port plan
 CHANGELOG.md
@@ -208,6 +212,40 @@ module rows (1.1.0-1, `intr` 0 by default) passed the same six rows polled and w
   boots on an A1200;
 - the module on real hardware: the A4000 rows, with interrupts by default, are a 1.1 release gate;
 - the interrupt path on a 68040/68060 on real hardware (the static 040/060 line was polled only).
+
+## The Buddha and Catweasel Z-II module
+
+The same source built with `-DIDE_BUDDHA` (`src/buddha.c`) is `buddha`, a second root-class module for
+the Individual Computers **Buddha** (Zorro II, manufacturer 0x1212, product 0x00, every revision: two
+IDE ports) and **Catweasel Z-II** (product 0x2A: three IDE ports). Everything specific to these boards
+is in the sections of `src/ide.c` marked BUDDHA; the shared code reaches the board through a few
+macros that a Gayle build defines to exactly what it compiled before, so the static driver and
+`gayle` keep their bytes.
+
+```sh
+make -C module buddha   # build/k30/mod.d/buddha and build/k46/mod.d/buddha
+```
+
+`buddha` is not in the default target yet: its match key `zorro:1212:00` has product 00, which the
+kit's `modcheck` and the module core refuse today ("neither the manufacturer nor the product may be
+zero"). Every other check of the kit passes.
+
+| | |
+|---|---|
+| `.moddata` | `name=buddha`, `class=root`, `match=zorro:1212:00,zorro:1212:2a`, `rank=ide`, `unload=never`, no `majors` |
+| Parameters | `intr` (1: interrupts after a self-test, the default; 0: polled), `slave` (1: master and slave on every port, the default; 0: masters only; 2: a slave only if it is ATAPI), `debug` (0–2) |
+| Registers | port p's task file at board + 0x800 + 0x200·p (DATA at the base, register n at + 2 + 4·n, as the Gayle's), alternate status / device control at + 0x11A; IRQ status at board + 0xF00 + 0x40·p (bit 7, the port's INTRQ level); the interrupt enable at board + 0xFC0 (write only; nothing but a reset clears it). Sources: the maker's register specification as the Linux kernel carries it (`Documentation/arch/m68k/buddha-driver.rst`), Linux `pata_buddha.c`, and the WinUAE/Amiberry model |
+| Never touched | below board + 0x800 (AutoConfig space and the speed register, whose AmigaOS setting is kept), 0xE00–0xEFF (the clock port), from 0x1000 up (the ROM, a flash chip on the Buddha Flash), a Buddha's absent third port, and everything between the registers above |
+| Load | `autocon()` for every Buddha, then every Catweasel Z-II (at most four boards); per port `bprobe` of the alternate status, then the task-file write/readback; polled IDENTIFY of each answering port's master and slave; `sd_register(idequeue, b, base, "Buddha IDE" or "Catweasel IDE", 4)` once per board with a drive, with `b` the board's index and `base` its AutoConfig address, never a port's. No board, no answering port or no drive: `ENXIO`, silently. There is no chipset or Kickstart gate: the boards work in any Zorro II Amiga |
+| Units | fixed per port and drive: port 0 master 6, slave 5; port 1 master 3, slave 2; port 2 (Catweasel Z-II) master 1, slave 0. 4 and 7 are not used. A lone Buddha is card 0, so its port-0 master is `c6d0` |
+| Interrupts | one command is on the board at a time, whichever port it is for. With `intr=1`, at the first `sysinit`: `intr_attach` at level 2, then each port with a drive is tested on its own: the board's enable is written (once per board), the port's nIEN cleared, and READ VERIFY SECTOR(S) (an ATA drive) or IDENTIFY PACKET DEVICE (a port with only an ATAPI device) must interrupt. When every port passed, nIEN is cleared on all of them: interrupt I/O. Otherwise every drive keeps nIEN and the driver stays polled. An INTRQ on a port with no command (none should come) is dropped by reading that port's STATUS |
+| Halt | nIEN on every drive; the board's enable cannot be cleared |
+| Console | the per-drive lines say `ide<d>` with d = 6·board + 2·port + (0 master, 1 slave) |
+
+**Tested** in the host harness only: `ide_budtest`, 174 checks per line (discovery, the register map per
+port, the units of every port and drive, two boards, ATAPI, the interrupt self-test, halt and unload,
+no access outside the allowed registers). **Not tested yet:** in emulation, and on a real Buddha or
+Catweasel Z-II.
 
 ## Hardware notes
 
