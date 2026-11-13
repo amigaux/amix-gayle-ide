@@ -3,10 +3,17 @@
 # One Master for both lines: no $cpu, the kit's fragment gives the line's.
 # $class root: loaded by the core's root pass before the root is mounted; a
 # root-class module is never unloaded ($unload never).
-# $match: the Individual Computers Buddha (manufacturer 0x1212, product 0x00,
-# every revision) and Catweasel Z-II (product 0x2A); the core links the
-# module only when one of them is in the AutoConfig list.  buddha_load
-# finds the boards with autocon() and probes each port.
+# $match: the Catweasel Z-II (manufacturer 0x1212, product 0x2A) and the
+# stand-in mobo:buddha for the Buddha (product 0x00, every revision).  The
+# 1.1 kernels' module core refuses a zorro key whose product is 00, so the
+# Buddha's own key zorro:1212:00 cannot be listed yet; mobo:buddha is in the
+# kit's motherboard registry with no probe, and the core passes every mobo:
+# key, so the module is linked wherever its generation carries it.
+# buddha_load finds the boards itself with autocon() (product 0x00 and 0x2A)
+# and returns ENXIO, silently, when there is none.  When kernels whose core
+# takes product 00 ship (amix-dlm core patch 0055, kabi minor 5), the line
+# becomes $match zorro:1212:00,zorro:1212:2a (amix-dlm C4-2 section 8.2
+# item 7).
 # $rank ide: sd's class 4 (C4-1 section 4), the argument buddha_load passes
 # to sd_register, once per board.  No $majors: sd owns the disk majors.
 # $modtype misc: MOD_HDRV_WRAPPER, no switch-table slot.
@@ -17,7 +24,7 @@
 # (Catweasel Z-II) 1 and 0.
 $modtype misc
 $class root
-$match zorro:1212:00,zorro:1212:2a
+$match zorro:1212:2a,mobo:buddha
 $rank ide
 $unload never
 $param intr:int:1:0:1

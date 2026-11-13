@@ -229,14 +229,15 @@ make -C module          # gayle, then buddha: build/buddha/k30/mod.d/buddha and 
 make -C module buddha   # buddha alone
 ```
 
-`buddha` needs kits of **kabi 1.5 or later** (`k30.1.5`, `k46.1.5`) and runs on kernels of that
-minor: its match key `zorro:1212:00` has product 00, which only a core of minor 5 takes (amix-dlm
-C3-1 version 7, C3-2 version 5). The kit's `modcheck` tags it `k30.1.5` / `k46.1.5`. `gayle` keeps
-its own minimum, kabi 1.2.
+`buddha` builds with the 1.1 kits (kabi 1.2 or later, from amix f00b5fef, whose motherboard registry
+lists `buddha`) and is tagged by what it imports, so one object loads on the 1.1 kernels and later
+ones. The Buddha's own key `zorro:1212:00` has product 00, which the 1.1 kernels' module core refuses,
+so the module lists the stand-in `mobo:buddha` beside the Catweasel Z-II's key; `_load` finds the
+boards itself. `module/buddha/Master` says when the key changes.
 
 | | |
 |---|---|
-| `.moddata` | `name=buddha`, `class=root`, `match=zorro:1212:00,zorro:1212:2a`, `rank=ide`, `unload=never`, no `majors` |
+| `.moddata` | `name=buddha`, `class=root`, `match=zorro:1212:2a,mobo:buddha` (the stand-in above), `rank=ide`, `unload=never`, no `majors` |
 | Parameters | `intr` (1: interrupts after a self-test, the default; 0: polled), `slave` (1: master and slave on every port, the default; 0: masters only; 2: a slave only if it is ATAPI), `debug` (0–2) |
 | Registers | port p's task file at board + 0x800 + 0x200·p (DATA at the base, register n at + 2 + 4·n, as the Gayle's), alternate status / device control at + 0x11A; IRQ status at board + 0xF00 + 0x40·p (bit 7, the port's INTRQ level); the interrupt enable at board + 0xFC0 (write only; nothing but a reset clears it). Sources: the maker's register specification as the Linux kernel carries it (`Documentation/arch/m68k/buddha-driver.rst`), Linux `pata_buddha.c`, and the WinUAE/Amiberry model |
 | Never touched | below board + 0x800 (AutoConfig space and the speed register, whose AmigaOS setting is kept), 0xE00–0xEFF (the clock port), from 0x1000 up (the ROM, a flash chip on the Buddha Flash), a Buddha's absent third port, and everything between the registers above |

@@ -23,9 +23,9 @@
 # build/kit/k30 and build/kit/k46); KIT_k30 / KIT_k46 name a kit directly.
 # amix-dlm now lives in the amigaux/amix repository as kernel/dlm, so the
 # default is ../amix/kernel/dlm, or ../amix-dlm where only that exists.
-# The kits must be kabi k30.1.2 / k46.1.2 or later (root_defer on k30) for
-# gayle, and k30.1.5 / k46.1.5 or later for buddha (minor 5: a core that takes
-# its match key zorro:1212:00, a product of 00; amix-dlm C3-2 section 3).
+# The kits must be kabi k30.1.2 / k46.1.2 or later (root_defer on k30); for
+# buddha the kit's motherboard registry must also list `buddha' (amix
+# f00b5fef or later), the stand-in key its Master names.
 # The pinned cross tools (m68k-cbm-sysv4-*) and python3 must be on PATH.
 # The kit's fragment does the rest: objects and the module under
 # build/<line> (MODOUT, here the repo's build/), $cpu from the line.

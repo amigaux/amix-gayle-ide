@@ -2763,11 +2763,13 @@ MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "Gayle IDE (A4000,
 
 #if IDE_BUDDHA
 /* ============================================================================
- * BUDDHA: the module form, `buddha' (amix-dlm contracts C4-2 version 10
- * section 8.2, C4-1 version 9).  module/Master.buddha gives the .moddata:
- * class=root, match=zorro:1212:00,zorro:1212:2a, rank=ide, unload=never, no
- * majors.  The core links the module only when such a board is in the
- * AutoConfig list, on any Amiga: there is no chipset or Kickstart gate.
+ * BUDDHA: the module form, `buddha' (amix-dlm contracts C4-2 version 11
+ * section 8.2, C4-1 version 9).  module/buddha/Master gives the .moddata:
+ * class=root, rank=ide, unload=never, no majors, and the match keys (the
+ * Catweasel Z-II's, and a stand-in for the Buddha's on the 1.1 kernels: see
+ * there).  Nothing here depends on the key: the boards are found with
+ * autocon() by manufacturer and product, on any Amiga, with no chipset or
+ * Kickstart gate.
  *
  * buddha_load() runs in the root pass, at level 7 with the clock stopped
  * (see the Gayle's block above for what that rules out).  In order:
