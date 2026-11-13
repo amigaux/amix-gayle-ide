@@ -104,5 +104,10 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   driven; ATAPI on a port's slave and alone on a port; the self-test (the enable written once per
   board, every port with a drive tested, nIEN cleared on all on a pass, kept on all with the handler
   detached when a port stays silent or `intr_attach` refuses); a stray INTRQ on an idle port dropped;
-  parameters and `sd_register`/`root_defer` errors; `_halt` and `_unload`; and no access outside the
-  allowed registers in any case (the mock's own counting checked first).
+  parameters and `sd_register`/`root_defer` errors; `_halt` and `_unload`; the layouts of a port
+  (none, master, slave alone, both) on ports 0 and 1 under three models of what an absent device
+  reads as (`mock_absent_mode`: the open bus, Amiberry's, a bus holding the last byte), a slave
+  alone attached with its master never sent a command, ATA and ATAPI slaves alone through the
+  self-test and interrupt I/O, `slave=0`, no ghost slave when device 0 answers for an absent
+  device 1 (`mock_ghost`); and no access outside the allowed registers in any case (the mock's own
+  counting checked first).

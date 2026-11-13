@@ -247,10 +247,15 @@ boards itself. `module/buddha/Master` says when the key changes.
 | Halt | nIEN on every drive; the board's enable cannot be cleared |
 | Console | the per-drive lines say `ide<d>` with d = 6·board + 2·port + (0 master, 1 slave) |
 
-**Tested** in the host harness only: `ide_budtest`, 174 checks per line (discovery, the register map per
-port, the units of every port and drive, two boards, ATAPI, the interrupt self-test, halt and unload,
-no access outside the allowed registers). **Not tested yet:** in emulation, and on a real Buddha or
-Catweasel Z-II.
+**Tested** in the host harness: `ide_budtest`, 411 checks per line (discovery, the register map per
+port, the units of every port and drive, a slave alone, two boards, ATAPI, the interrupt self-test,
+halt and unload, no access outside the allowed registers). In emulation (Amiberry's Buddha with its
+ROM v103.17), 1.1.0-2: the root on port 0's master on both lines, and on the 68040/68060 line on
+port 1's master and on port 0's slave beside a master, interrupt I/O after the self-test; ATAPI
+CD-ROMs on port 0's slave and port 1's master mounted; a machine without a Buddha silent; a Gayle
+root keeping its disk names with a Buddha added. A slave alone was not attached there, which
+1.1.0-3 fixes; that row is still to be run again. **Not tested yet:** on a real Buddha or
+Catweasel Z-II, and the Catweasel Z-II in emulation.
 
 ## Hardware notes
 

@@ -33,6 +33,11 @@
  *     an INTRQ on a port with no command is dropped by reading its STATUS;
  *   - parameters (intr, slave, debug), sd_register and root_defer errors;
  *   - _halt and _unload: nIEN on every port, no command;
+ *   - the layouts of a port (none, master, slave alone, both) on ports 0 and
+ *     1 under three models of an absent device (open bus, Amiberry's, a bus
+ *     holding the last byte); a slave alone attached, its master never sent
+ *     a command, the self-test run on it (ATA and ATAPI); slave=0 leaving it;
+ *     device 0 answering for an absent device 1 giving no ghost slave;
  *   - the forbidden ranges: nothing below 0x800, nothing in the clock port,
  *     the ROM or between the registers, no read of the enable, no access to
  *     a Buddha's (absent) third port -- in every case.
@@ -728,6 +733,130 @@ test_halt_unload()
 	no_forbidden( "halt and unload: nothing outside the port registers");
 }
 
+/*
+ * Which drives a port has: none, the master, the slave alone, or both, on
+ * port 0 and on port 1, under each model of what an absent device reads as
+ * (the open bus, Amiberry's, a bus that holds the last byte written).  A
+ * slave alone is attached as the slave; the master of such a port is never
+ * sent a command.
+ */
+static void
+test_layouts()
+{
+	static int	munit[2] = { 6, 3 }, sunit[2] = { 5, 2 };
+	static char	*modes[3] = { "open bus", "Amiberry", "bus hold" };
+	struct sdcom	cp;
+	char		buf[512], msg[160];
+	int		mode, p, lay, e, m, sl;
+
+	for (mode = 0; mode < 3; ++mode)
+		for (p = 0; p < 2; ++p)
+			for (lay = 0; lay < 4; ++lay) {	/* bit 0 master, bit 1 slave */
+				m = lay & 1;
+				sl = (lay >> 1) & 1;
+				fresh();
+				mock_absent_mode = mode;
+				if (m)
+					disk( 0, p, 0, 2048L, 0x40 + p);
+				if (sl)
+					disk( 0, p, 1, 2048L, 0x50 + p);
+				e = buddha_load( "intr=0");
+				sprintf( msg, "%s, port %d, %s", modes[mode], p,
+					 lay == 0 ? "no drive" : lay == 1 ? "master only" :
+					 lay == 2 ? "slave only" : "master and slave");
+				if (lay == 0) {
+					CHECK( e == ENXIO_, msg);
+					quiet_enxio( msg);
+					no_forbidden( msg);
+					continue;
+				}
+				CHECK( e == 0 && sr_calls == 1, msg);
+				CHECK( bud_chok[p] == 1 && bud_chok[p ^ 1] == 0, msg);
+				/* IDENTIFY: each drive that is there; an absent slave beside a
+				 * master may be asked too (unless its status shows BSY, as a
+				 * holding bus does); an absent master never */
+				CHECK( m ? mock_cmd_count[0xEC] >= (unsigned long)(m + sl)
+					   && mock_cmd_count[0xEC] <= 2
+					 : mock_cmd_count[0xEC] == 1,
+				       "IDENTIFY: every drive there, never an absent master");
+				read1( &cp, 0, 0, munit[p], 4L, buf);
+				CHECK( intr_calls == 1 && (m ? cp.okay && marker( buf) == 0x40 + p : !cp.okay), msg);
+				read1( &cp, 0, 0, sunit[p], 4L, buf);
+				CHECK( intr_calls == 1 && (sl ? cp.okay && marker( buf) == 0x50 + p : !cp.okay), msg);
+				no_forbidden( msg);
+			}
+}
+
+/* a slave alone: interrupt I/O through it, ATA and ATAPI; slave=0 leaves it */
+static void
+test_lone_slave()
+{
+	struct sdcom	cp;
+	unsigned char	cbuf[2048];
+	char		buf[512];
+	int		e, i, ok;
+
+	fresh();
+	disk( 0, 1, 1, 2048L, 0x58);		/* port 1: an ATA slave alone */
+	e = load_intr( (char *)0);
+	CHECK( e == 0 && ide_selftest == 1, "ATA slave alone: the self-test passes on the slave");
+	CHECK( mock_cmd_count[0x40] == 1 && mock_cmd_count[0xEC] == 1,
+	       "READ VERIFY to the slave; one IDENTIFY, the slave's");
+	CHECK( mock_cnien[CAB( 0, 1)] == 0, "nIEN clear on the port");
+	read1( &cp, 0, 0, 2, 6L, (char *)buf);
+	CHECK( intr_calls == 1 && cp.okay && marker( buf) == 0x58 && claims > 0,
+	       "unit 2 through the interrupt path");
+	no_forbidden( "ATA slave alone: nothing outside the port registers");
+
+	fresh();
+	mock_absent_mode = MOCK_ABSENT_UAE;
+	mock_add_cdrom_on( CAB( 0, 0), 1, 64L, "MOCK CD-ROM");	/* port 0: an ATAPI slave alone */
+	e = load_intr( (char *)0);
+	CHECK( e == 0 && ide_selftest == 1, "ATAPI slave alone: the self-test passes on it");
+	CHECK( mock_cmd_count[0xA1] == 2, "IDENTIFY PACKET DEVICE: the attach's and the self-test's");
+	memset( &cp, 0, sizeof cp);
+	cp.cdb[0] = 0x28; cp.cdb[5] = 9; cp.cdb[8] = 1;
+	cp.addr = (char *)cbuf; cp.nbyte = 2048; cp.unit = 5; cp.intr = done; cp.reading = 1;
+	intr_calls = 0;
+	(*sr_fn)( 0, &cp);
+	deliver();
+	CHECK( intr_calls == 1 && cp.okay && cp.status == 0, "unit 5 reads the CD-ROM");
+	for (ok = 1, i = 0; i < 2048; ++i)
+		if (cbuf[i] != mock_cdrv[CAB( 0, 0)][1].cd[9 * MOCK_CD_BLOCK + i])
+			ok = 0;
+	CHECK( ok, "the CD-ROM's block, byte for byte");
+	read1( &cp, 0, 0, 6, 0L, (char *)buf);
+	CHECK( intr_calls == 1 && !cp.okay, "unit 6: no master");
+	no_forbidden( "ATAPI slave alone: nothing outside the port registers");
+
+	fresh();
+	disk( 0, 0, 1, 2048L, 0x59);
+	e = buddha_load( "intr=0 slave=0");
+	CHECK( e == ENXIO_ && mock_slave_selects == 0, "slave=0: a slave alone is not probed, ENXIO");
+	quiet_enxio( "slave=0, slave alone: not registered");
+	no_forbidden( "slave=0: nothing outside the port registers");
+}
+
+/* device 0 answering for an absent device 1 does not make a slave */
+static void
+test_ghost()
+{
+	struct sdcom	cp;
+	char		buf[512];
+	int		e;
+
+	fresh();
+	mock_ghost = 1;
+	disk( 0, 0, 0, 2048L, 0x5A);
+	e = buddha_load( "intr=0");
+	CHECK( e == 0, "master only, device 0 answering for device 1: loads");
+	read1( &cp, 0, 0, 5, 0L, buf);
+	CHECK( intr_calls == 1 && !cp.okay, "no ghost slave: unit 5 is no device");
+	read1( &cp, 0, 0, 6, 0L, buf);
+	CHECK( cp.okay && marker( buf) == 0x5A, "the master reads");
+	no_forbidden( "ghost: nothing outside the port registers");
+}
+
 int
 main()
 {
@@ -749,6 +878,9 @@ main()
 	fprintf( stderr, "== test_intr_selftest_fail\n"); test_intr_selftest_fail();
 	fprintf( stderr, "== test_params_errors\n"); test_params_errors();
 	fprintf( stderr, "== test_halt_unload\n"); test_halt_unload();
+	fprintf( stderr, "== test_layouts\n"); test_layouts();
+	fprintf( stderr, "== test_lone_slave\n"); test_lone_slave();
+	fprintf( stderr, "== test_ghost\n"); test_ghost();
 	fresh();
 	CHECK( forbidden_total == 0, "no forbidden board access in any case");
 	CHECK( mock_id_reads + mock_id_writes == 0, "no access to 0xDE1000");
