@@ -25,6 +25,12 @@
 #define MOCK_BOARD_A4000	1
 #define MOCK_BOARD_A1200	2
 #define MOCK_BOARD_A600		3
+#define MOCK_BOARD_BUDDHA	4	/* no Gayle; the Buddha boards in mock_bud[] */
+
+/* One cable per Gayle port or Buddha port: the Gayle is cable 0, Buddha
+ * board b's port p cable b * 3 + p. */
+#define MOCK_NBUD		2
+#define MOCK_NCABLE		(MOCK_NBUD * 3)
 
 struct mock_drive {
 	int		present;
@@ -55,7 +61,24 @@ struct mock_drive {
 
 #define MOCK_CD_BLOCK	2048
 
-extern struct mock_drive	mock_drv[2];
+extern struct mock_drive	mock_cdrv[MOCK_NCABLE][2];
+extern int			mock_cnien[MOCK_NCABLE], mock_cintrq[MOCK_NCABLE];
+#define mock_drv		(mock_cdrv[0])		/* the Gayle's two drives */
+
+/* A Buddha / Catweasel Z-II board (MOCK_BOARD_BUDDHA): 64 KB at `base';
+ * ports at + 0x800 + 0x200 * p (two, three on a Catweasel Z-II), IRQ status
+ * at + 0xF00 + 0x40 * p, the write-only enable at + 0xFC0.  Any other access
+ * on the board counts in mock_bud_forbidden (and mock_bad_accesses). */
+struct mock_bud {
+	int		present;
+	int		cwz2;		/* a Catweasel Z-II: product 0x2A, three ports */
+	unsigned long	base;
+	int		intena;		/* the enable was written: INT2 passes */
+	unsigned long	intena_writes;
+};
+extern struct mock_bud		mock_bud[MOCK_NBUD];
+extern unsigned long		mock_bud_forbidden;
+extern unsigned long		mock_bud_intena_reads;
 extern int			mock_board;
 extern unsigned short		mock_vposr_value;	/* used when mock_vposr_override */
 extern int			mock_vposr_override;
@@ -67,8 +90,8 @@ extern unsigned long		mock_cmd_count[256];	/* commands issued, by opcode */
 extern int			mock_last_cmd;
 extern int			mock_cmd_log[64];	/* opcodes in issue order */
 extern int			mock_cmd_log_n;
-extern int			mock_nien;		/* drive's nIEN (1 = interrupts off) */
-extern int			mock_intrq;		/* drive asserting INTRQ */
+#define mock_nien		(mock_cnien[0])		/* drive's nIEN (1 = interrupts off) */
+#define mock_intrq		(mock_cintrq[0])	/* drive asserting INTRQ */
 extern int			mock_irq_latch;		/* A1200/A600 INTREQ bit 7 */
 extern unsigned char		mock_intena;		/* A1200/A600 INTENA register */
 extern unsigned long		mock_irq_acks;		/* acknowledge writes seen */
@@ -119,6 +142,8 @@ extern unsigned			mock_atapi_out_n;
 void mock_reset();
 void mock_add_cdrom();			/* (unit, blocks, model) */
 void mock_add_drive();			/* (unit, nsectors, model, flush) */
+void mock_add_drive_on();		/* (cable, unit, nsectors, model, flush) */
+void mock_add_cdrom_on();		/* (cable, unit, blocks, model) */
 void mock_free();
 unsigned long mock_cmds();		/* total commands issued */
 int  mock_int2_asserted();		/* would p2int run now? */

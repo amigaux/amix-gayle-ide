@@ -1,6 +1,8 @@
 /*
  * mock_gayle.c -- behavioural mock of the Gayle IDE port (A4000 / A1200 /
- * A600) and two ATA-2 drives for the host harness.  See mock_gayle.h.
+ * A600) and two ATA-2 drives for the host harness, and of the Buddha /
+ * Catweasel Z-II (up to two boards, one cable of two drives per port).
+ * See mock_gayle.h.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +38,25 @@
 #define ER_IDNF	0x10
 #define ER_ABRT	0x04
 
-struct mock_drive	mock_drv[2];
+/* Every cable (a Gayle port, or one port of a Buddha board) has its own
+ * task file, drives, data phase and INTRQ.  `ci' is the cable the access in
+ * progress goes to; the Gayle is cable 0, Buddha board b's port p is cable
+ * b * 3 + p.  mock_gayle.h maps mock_drv, mock_nien and mock_intrq to
+ * cable 0 for the harness; inside this file they mean cable `ci'. */
+struct mock_drive	mock_cdrv[MOCK_NCABLE][2];
+int			mock_cnien[MOCK_NCABLE], mock_cintrq[MOCK_NCABLE];
+static int		ci;
+#undef mock_drv
+#undef mock_nien
+#undef mock_intrq
+#define mock_drv	(mock_cdrv[ci])
+#define mock_nien	(mock_cnien[ci])
+#define mock_intrq	(mock_cintrq[ci])
+
+struct mock_bud		mock_bud[MOCK_NBUD];
+unsigned long		mock_bud_forbidden;	/* accesses a board does not allow */
+unsigned long		mock_bud_intena_reads;	/* reads of the write-only enable */
+
 int			mock_board = MOCK_BOARD_A4000;
 unsigned short		mock_vposr_value;
 int			mock_vposr_override;
@@ -46,7 +66,7 @@ unsigned long		mock_srst_count;
 int			mock_last_cmd = -1;
 int			mock_cmd_log[64];
 int			mock_cmd_log_n;
-int			mock_nien, mock_intrq, mock_irq_latch;
+int			mock_irq_latch;
 unsigned char		mock_intena;
 int			mock_rom;
 int			mock_latch_stuck;
@@ -176,26 +196,54 @@ struct mock_lineop	mock_lineops[MOCK_LINEOPS];
 int			mock_nlineops;
 unsigned long		mock_lineops_lost;
 
-/* task file (shared by both drives, as on the real cable) */
-static unsigned char	r_nsect, r_sect, r_lcyl, r_hcyl, r_sdh, r_error, r_control;
-static unsigned char	r_status[2];
-static int		sel;			/* selected drive 0/1 */
+#define ABUF	(64 * 1024)
+struct cable {
+	/* task file (shared by both drives, as on the real cable) */
+	unsigned char	r_nsect, r_sect, r_lcyl, r_hcyl, r_sdh, r_error, r_control;
+	unsigned char	r_status[2];
+	int		sel;			/* selected drive 0/1 */
+	/* data phase */
+	unsigned char	xbuf[MOCK_SECTOR];
+	int		xidx, xmode;		/* xmode: 0 idle, 1 read, 2 write, 3 ATAPI packet,
+						 * 4 ATAPI data in, 5 ATAPI data out */
+	unsigned long	xlba, xleft;
+	/* ATAPI phases */
+	unsigned char	abuf[ABUF];		/* response (in) or received data (out) */
+	unsigned	alen, apos, aphase;	/* total, done, left in this DRQ phase */
+	unsigned char	pktbuf[16];
+	int		pidx;
+	unsigned	pkt_bc;
+	int		glitch_left;		/* see mock_drive.glitch */
+};
+static struct cable	cables[MOCK_NCABLE];
+#define CC		(cables[ci])
+#define r_nsect		CC.r_nsect
+#define r_sect		CC.r_sect
+#define r_lcyl		CC.r_lcyl
+#define r_hcyl		CC.r_hcyl
+#define r_sdh		CC.r_sdh
+#define r_error		CC.r_error
+#define r_control	CC.r_control
+#define r_status	CC.r_status
+#define sel		CC.sel
+#define xbuf		CC.xbuf
+#define xidx		CC.xidx
+#define xmode		CC.xmode
+#define xlba		CC.xlba
+#define xleft		CC.xleft
+#define abuf		CC.abuf
+#define alen		CC.alen
+#define apos		CC.apos
+#define aphase		CC.aphase
+#define pktbuf		CC.pktbuf
+#define pidx		CC.pidx
+#define pkt_bc		CC.pkt_bc
+#define glitch_left	CC.glitch_left
+
 static int		id_cnt;			/* Gayle ID serial read position */
 
-/* data phase */
-static unsigned char	xbuf[MOCK_SECTOR];
-static int		xidx, xmode;		/* xmode: 0 idle, 1 read, 2 write, 3 ATAPI packet,
-						 * 4 ATAPI data in, 5 ATAPI data out */
-static unsigned long	xlba, xleft;
-
-/* ATAPI phases */
-#define ABUF	(64 * 1024)
-static unsigned char	abuf[ABUF];		/* response (in) or received data (out) */
-static unsigned		alen, apos, aphase;	/* total, done, left in this DRQ phase */
-static unsigned char	pktbuf[16];
-static int		pidx;
-static unsigned		pkt_bc;
-static int		glitch_left;		/* see mock_drive.glitch */
+static void		add_drive(), add_cdrom();
+static int		bud_nports();
 
 static struct mock_drive *
 cur()
@@ -212,7 +260,58 @@ base()
 static int
 has_gayle()
 {
-	return mock_board != MOCK_BOARD_NONE;
+	return mock_board != MOCK_BOARD_NONE && mock_board != MOCK_BOARD_BUDDHA;
+}
+
+/* the Buddha board an address falls on, or -1 */
+static int
+bud_board_of( addr)
+unsigned long	addr;
+{
+	int	b;
+
+	if (mock_board != MOCK_BOARD_BUDDHA)
+		return -1;
+	for (b = 0; b < MOCK_NBUD; ++b)
+		if (mock_bud[b].present && addr >= mock_bud[b].base && addr < mock_bud[b].base + 0x10000L)
+			return b;
+	return -1;
+}
+
+/*
+ * A port register of board b at board offset `off': selects the port's cable
+ * (ci) and returns the offset the Gayle model uses (R_DATA, R_ERROR ...
+ * R_STATUS, R_ALTSTAT), or -1 for anything else.  Only the registers the
+ * specification names are decoded: DATA at the port base, register n at
+ * + 2 + 4 * n, alternate status / device control at + 0x11A.
+ */
+static long
+bud_reg( b, off)
+int		b;
+unsigned long	off;
+{
+	unsigned long	rel;
+	int		p;
+
+	if (off < 0x800 || off >= 0x800 + 0x200L * bud_nports( b))
+		return -1;
+	p   = (int)((off - 0x800) / 0x200);
+	rel = (off - 0x800) % 0x200;
+	ci  = b * 3 + p;
+	if (rel == 0x11A)
+		return R_ALTSTAT;
+	if (rel <= 0x1E && (rel == 0 || (rel & 3) == 2))
+		return (long)rel;
+	return -1;
+}
+
+/* an access the board does not allow (outside its ports' registers, the
+ * IRQ status registers and the enable) */
+static void
+bud_forbidden()
+{
+	mock_bud_forbidden++;
+	mock_bad_accesses++;
 }
 
 void
@@ -236,17 +335,23 @@ mock_reset()
 	mock_last_cmd = -1;
 	mock_srst_count = 0;
 	mock_cmd_log_n = 0;
-	mock_nien = 1;				/* ATA default after reset: interrupts off? no -- 0.  Driver sets it. */
-	mock_nien = 0;
-	mock_intrq = mock_irq_latch = 0;
+	mock_irq_latch = 0;
 	mock_intena = 0;
 	mock_vposr_value = 0; mock_vposr_override = 0;
-	r_nsect = r_sect = r_lcyl = r_hcyl = r_error = r_control = 0;
-	r_sdh = 0xA0;
-	r_status[0] = r_status[1] = ST_DRDY | ST_DSC;
-	sel = 0; id_cnt = 0;
-	xmode = 0; xidx = 0; xlba = xleft = 0;
-	alen = apos = aphase = 0; pidx = 0; glitch_left = 0;
+	for (ci = 0; ci < MOCK_NCABLE; ++ci) {
+		mock_nien = 0;			/* ATA default after reset; the driver sets it */
+		mock_intrq = 0;
+		r_nsect = r_sect = r_lcyl = r_hcyl = r_error = r_control = 0;
+		r_sdh = 0xA0;
+		r_status[0] = r_status[1] = ST_DRDY | ST_DSC;
+		sel = 0;
+		xmode = 0; xidx = 0; xlba = xleft = 0;
+		alen = apos = aphase = 0; pidx = 0; glitch_left = 0;
+	}
+	ci = 0;
+	id_cnt = 0;
+	memset( mock_bud, 0, sizeof mock_bud);
+	mock_bud_forbidden = mock_bud_intena_reads = 0;
 	mock_pkt_log_n = 0; mock_pkt_bc = 0; mock_atapi_out_n = 0;
 	memset( mock_pkt_last, 0, sizeof mock_pkt_last);
 }
@@ -254,17 +359,62 @@ mock_reset()
 void
 mock_free()
 {
-	int	i;
+	int	i, c;
 
-	for (i = 0; i < 2; ++i) {
-		free( mock_drv[i].disk);
-		free( mock_drv[i].cd);
-		memset( &mock_drv[i], 0, sizeof mock_drv[i]);
-	}
+	for (c = 0; c < MOCK_NCABLE; ++c)
+		for (i = 0; i < 2; ++i) {
+			free( mock_cdrv[c][i].disk);
+			free( mock_cdrv[c][i].cd);
+			memset( &mock_cdrv[c][i], 0, sizeof mock_cdrv[c][i]);
+		}
+}
+
+/* mock_add_drive() / mock_add_cdrom() on cable c (a Buddha port) */
+void
+mock_add_drive_on( c, unit, nsectors, model, flush)
+int		c, unit, flush;
+unsigned long	nsectors;
+const char	*model;
+{
+	ci = c;
+	add_drive( unit, nsectors, model, flush);
+	ci = 0;
+}
+
+void
+mock_add_cdrom_on( c, unit, blocks, model)
+int		c, unit;
+unsigned long	blocks;
+const char	*model;
+{
+	ci = c;
+	add_cdrom( unit, blocks, model);
+	ci = 0;
 }
 
 void
 mock_add_drive( unit, nsectors, model, flush)
+int		unit, flush;
+unsigned long	nsectors;
+const char	*model;
+{
+	ci = 0;
+	add_drive( unit, nsectors, model, flush);
+}
+
+void
+mock_add_cdrom( unit, blocks, model)
+int		unit;
+unsigned long	blocks;
+const char	*model;
+{
+	ci = 0;
+	add_cdrom( unit, blocks, model);
+}
+
+/* on cable `ci' */
+static void
+add_drive( unit, nsectors, model, flush)
 int		unit, flush;
 unsigned long	nsectors;
 const char	*model;
@@ -286,8 +436,8 @@ const char	*model;
 }
 
 /* An ATAPI CD-ROM with `blocks' 2048-byte blocks of a recognisable pattern. */
-void
-mock_add_cdrom( unit, blocks, model)
+static void
+add_cdrom( unit, blocks, model)
 int		unit;
 unsigned long	blocks;
 const char	*model;
@@ -320,11 +470,28 @@ mock_cmds()
 	return n;
 }
 
+static int
+bud_nports( b)
+int	b;
+{
+	return mock_bud[b].cwz2 ? 3 : 2;
+}
+
 int
 mock_int2_asserted()
 {
+	int	b, p;
+
+	if (mock_board == MOCK_BOARD_BUDDHA) {	/* the enabled boards' ports, ORed */
+		for (b = 0; b < MOCK_NBUD; ++b)
+			if (mock_bud[b].present && mock_bud[b].intena)
+				for (p = 0; p < bud_nports( b); ++p)
+					if (mock_cintrq[b * 3 + p])
+						return 1;
+		return 0;
+	}
 	if (mock_board == MOCK_BOARD_A4000)
-		return mock_intrq;
+		return mock_cintrq[0];
 	if (mock_board == MOCK_BOARD_NONE)
 		return 0;
 	return mock_irq_latch && (mock_intena & 0x80);
@@ -862,10 +1029,32 @@ unsigned long	addr;
 {
 	unsigned char	v = 0xFF;
 
+	int		b, p;
+	long		r;
+	unsigned long	off;
+
 	if (in_rom( addr))
 		return rom_rb( addr);
 	mock_accesses++;
 	bank( addr);
+	ci = 0;
+	if ((b = bud_board_of( addr)) >= 0) {
+		off = addr - mock_bud[b].base;
+		r = bud_reg( b, off);
+		if (r > 0 && tf_read( (unsigned long)r, &v)) {
+			mock_seq++;
+			if (wr_pending)
+				mock_order_violations++;
+			return v;
+		}
+		for (p = 0; p < bud_nports( b); ++p)
+			if (off == 0xF00 + 0x40L * p)
+				return mock_cintrq[b * 3 + p] ? 0x80 : 0x00;
+		if (off >= 0xFC0 && off < 0x1000)
+			mock_bud_intena_reads++;
+		bud_forbidden();
+		return 0xFF;
+	}
 	if (addr == GAYLE_ID) {
 		mock_id_reads++;
 		if (mock_board == MOCK_BOARD_A1200 || mock_board == MOCK_BOARD_A600) {
@@ -903,8 +1092,29 @@ mock_wb( addr, v)
 unsigned long	addr;
 unsigned char	v;
 {
+	int		b;
+	long		r;
+	unsigned long	off;
+
 	mock_accesses++;
 	bank( addr);
+	ci = 0;
+	if ((b = bud_board_of( addr)) >= 0) {
+		off = addr - mock_bud[b].base;
+		r = bud_reg( b, off);
+		if (r > 0 && tf_write( (unsigned long)r, v)) {
+			mock_seq++;
+			wr_pending = 1;
+			return;
+		}
+		if (off == 0xFC0) {		/* the enable: any value, no way back */
+			mock_bud[b].intena = 1;
+			mock_bud[b].intena_writes++;
+			return;
+		}
+		bud_forbidden();
+		return;
+	}
 	if (addr == GAYLE_ID) {
 		mock_id_writes++;
 		id_cnt = 0;
@@ -939,17 +1149,23 @@ mock_rw( addr)
 unsigned long	addr;
 {
 	unsigned short	w;
+	int		b;
 
 	if (in_rom( addr) && !(addr & 1))
 		return ((unsigned short)rom_rb( addr) << 8) | rom_rb( addr + 1);
 	mock_accesses++;
 	bank( addr);
-	if (addr == VPOSR) {
+	ci = 0;
+	if ((b = bud_board_of( addr)) >= 0) {
+		if (bud_reg( b, addr - mock_bud[b].base) != R_DATA) {
+			bud_forbidden();
+			return 0xFFFF;
+		}
+	} else if (addr == VPOSR) {
 		if (mock_vposr_override)
 			return mock_vposr_value;
 		return mock_board == MOCK_BOARD_A600 || mock_board == MOCK_BOARD_NONE ? 0x2000 : 0x2300;
-	}
-	if (!(has_gayle() && addr == base() + R_DATA)) {
+	} else if (!(has_gayle() && addr == base() + R_DATA)) {
 		mock_bad_accesses++;
 		return 0xFFFF;
 	}
@@ -980,14 +1196,22 @@ mock_ww( addr, v)
 unsigned long	addr;
 unsigned short	v;
 {
-	struct mock_drive	*d = cur();
+	struct mock_drive	*d;
+	int			b;
 
 	mock_accesses++;
 	bank( addr);
-	if (!(has_gayle() && addr == base() + R_DATA)) {
+	ci = 0;
+	if ((b = bud_board_of( addr)) >= 0) {
+		if (bud_reg( b, addr - mock_bud[b].base) != R_DATA) {
+			bud_forbidden();
+			return;
+		}
+	} else if (!(has_gayle() && addr == base() + R_DATA)) {
 		mock_bad_accesses++;
 		return;
 	}
+	d = cur();
 	mock_taskfile_accesses++;
 	data_access();
 	wr_pending = 1;
