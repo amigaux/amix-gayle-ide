@@ -2,12 +2,13 @@
 # Buddha / Catweasel Z-II flavour of src/ide.c (src/buddha.c selects it),
 # built with amix-dlm's ABI kit like gayle (../Makefile).
 #
-#   make -C module            builds gayle and buddha on both lines; the
-#                             buddha module is build/<line>/mod.d/buddha
+#   make -C module buddha     buddha on both lines:
+#                             build/buddha/<line>/mod.d/buddha
 #   make -C module/buddha KIT=<a line's kit>    one line of buddha alone
 #
-# The objects share gayle's MODOUT (build/<line>, or build/<line>-diag with
-# DIAG=1) under their own name, obj/buddha.o.
+# Its own MODOUT, build/buddha/<line> (build/buddha/<line>-diag with DIAG=1),
+# so the kit's staging directory never meets gayle's and the two builds run
+# in either order; the last path element stays the line's name.
 
 TOP := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../..)
 
@@ -18,7 +19,7 @@ endif
 MODULE = buddha
 OBJS   = buddha.o
 DIAGFLAGS = $(if $(filter-out 0,$(DIAG)),-DIDE_DIAG=1)
-MODOUT = $(TOP)/build/$(LINE)$(if $(DIAGFLAGS),-diag)
+MODOUT = $(TOP)/build/buddha/$(LINE)$(if $(DIAGFLAGS),-diag)
 SRC    = $(TOP)/src
 ALIEN  = -I$(KIT)/stock/usr/sys/amiga/alien
 LINEFLAGS = $(if $(filter k46,$(LINE)),-DIDE_CACHE=1 -DIDE_NBPP=4096)

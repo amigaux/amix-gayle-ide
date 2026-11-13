@@ -6,8 +6,9 @@
 #   make -C module            both lines: build/k30/mod.d/gayle and
 #                             build/k46/mod.d/gayle, each checked by the kit's
 #                             modfix and modcheck.py, and scanned for 0xDE1000
-#   make -C module buddha     both lines of buddha: build/k30/mod.d/buddha and
-#                             build/k46/mod.d/buddha, checked the same way
+#   make -C module buddha     both lines of buddha: build/buddha/k30/mod.d/buddha
+#                             and build/buddha/k46/mod.d/buddha, checked the
+#                             same way
 #   make -C module k30        one line (or k46)
 #   make -C module static     the static object of each line compiled against
 #                             the kit's headers, and its sha256 (the static
@@ -54,6 +55,7 @@ clean: $(LINES:%=clean-%)
 
 $(LINES:%=clean-%): clean-%:
 	$(MAKE) KIT=$(call kit,$*) clean
+	$(MAKE) -C buddha KIT=$(call kit,$*) clean
 
 .PHONY: all static clean buddha $(LINES) $(LINES:%=static-%) $(LINES:%=clean-%) $(LINES:%=buddha-%)
 

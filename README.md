@@ -223,7 +223,7 @@ macros that a Gayle build defines to exactly what it compiled before, so the sta
 `gayle` keep their bytes.
 
 ```sh
-make -C module buddha   # build/k30/mod.d/buddha and build/k46/mod.d/buddha
+make -C module buddha   # build/buddha/k30/mod.d/buddha and build/buddha/k46/mod.d/buddha
 ```
 
 `buddha` is not in the default target yet: its match key `zorro:1212:00` has product 00, which the
