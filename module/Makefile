@@ -21,6 +21,8 @@
 #
 # DLM is the amix-dlm checkout whose kits are built (`make kit` there gives
 # build/kit/k30 and build/kit/k46); KIT_k30 / KIT_k46 name a kit directly.
+# amix-dlm now lives in the amigaux/amix repository as kernel/dlm, so the
+# default is ../amix/kernel/dlm, or ../amix-dlm where only that exists.
 # The kits must be kabi k30.1.2 / k46.1.2 or later (root_defer on k30) for
 # gayle, and k30.1.5 / k46.1.5 or later for buddha (minor 5: a core that takes
 # its match key zorro:1212:00, a product of 00; amix-dlm C3-2 section 3).
@@ -29,7 +31,7 @@
 # build/<line> (MODOUT, here the repo's build/), $cpu from the line.
 
 TOP := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
-DLM ?= $(abspath $(TOP)/../amix-dlm)
+DLM ?= $(abspath $(firstword $(wildcard $(TOP)/../amix/kernel/dlm $(TOP)/../amix-dlm) $(TOP)/../amix/kernel/dlm))
 LINES = k30 k46
 kit = $(or $(KIT_$(1)),$(DLM)/build/kit/$(1))
 

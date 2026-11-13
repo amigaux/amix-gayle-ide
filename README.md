@@ -161,7 +161,9 @@ make -C module DIAG=1   # a diagnostic build (-DIDE_DIAG), never for shipping
 ```
 
 It is built with amix-dlm's ABI kits, **kabi 1.2 on both lines** (`k30.1.2`, `k46.1.2`): `DLM=` names
-an amix-dlm checkout with built kits (default `../amix-dlm`), or `KIT_k30=` / `KIT_k46=` name the kits.
+the amix-dlm directory with built kits, `kernel/dlm` of an [amigaux/amix](https://github.com/amigaux/amix)
+checkout after `make kit` there (default `../amix/kernel/dlm`, or the older standalone `../amix-dlm`
+where only that exists), or `KIT_k30=` / `KIT_k46=` name the kits.
 The pinned cross tools (`m68k-cbm-sysv4-*`) and `python3` must be on `PATH`. Each build ends with the
 kit's `modcheck` line (`ok (k30.1.2, root, …)`, `ok (k46.1.2, root, …)`) and a scan that the module
 holds no `0xDE1000`.
