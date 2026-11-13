@@ -77,6 +77,19 @@ struct mock_bud {
 	unsigned long	intena_writes;
 };
 extern struct mock_bud		mock_bud[MOCK_NBUD];
+
+/* What a register read gives with the selected device absent (every cable):
+ * OPEN all 0xFF, except 0x00 for an absent device 1's status (the default,
+ * the harness's model from the start); UAE as Amiberry's ide.cpp: status
+ * 0x01 when the other device is there, else 0xFF, other registers 0x00;
+ * HOLD the last byte written on that cable (a bus that keeps its charge).
+ * mock_ghost: device 0 answers for an absent device 1 (ATA allows it), its
+ * registers taking device 1's writes as well. */
+#define MOCK_ABSENT_OPEN	0
+#define MOCK_ABSENT_UAE		1
+#define MOCK_ABSENT_HOLD	2
+extern int			mock_absent_mode;
+extern int			mock_ghost;
 extern unsigned long		mock_bud_forbidden;
 extern unsigned long		mock_bud_intena_reads;
 extern int			mock_board;

@@ -56,6 +56,8 @@ static int		ci;
 struct mock_bud		mock_bud[MOCK_NBUD];
 unsigned long		mock_bud_forbidden;	/* accesses a board does not allow */
 unsigned long		mock_bud_intena_reads;	/* reads of the write-only enable */
+int			mock_absent_mode;	/* MOCK_ABSENT_*: what an absent selected device reads as */
+int			mock_ghost;		/* device 0 answers register reads for an absent device 1 */
 
 int			mock_board = MOCK_BOARD_A4000;
 unsigned short		mock_vposr_value;
@@ -214,6 +216,7 @@ struct cable {
 	int		pidx;
 	unsigned	pkt_bc;
 	int		glitch_left;		/* see mock_drive.glitch */
+	unsigned char	bus_last;		/* the last byte written (MOCK_ABSENT_HOLD) */
 };
 static struct cable	cables[MOCK_NCABLE];
 #define CC		(cables[ci])
@@ -352,6 +355,8 @@ mock_reset()
 	id_cnt = 0;
 	memset( mock_bud, 0, sizeof mock_bud);
 	mock_bud_forbidden = mock_bud_intena_reads = 0;
+	mock_absent_mode = MOCK_ABSENT_OPEN;
+	mock_ghost = 0;
 	mock_pkt_log_n = 0; mock_pkt_bc = 0; mock_atapi_out_n = 0;
 	memset( mock_pkt_last, 0, sizeof mock_pkt_last);
 }
@@ -917,8 +922,13 @@ status()
 {
 	struct mock_drive	*d = cur();
 
-	if (!d->present)
+	if (!d->present) {
+		if (mock_absent_mode == MOCK_ABSENT_HOLD)
+			return CC.bus_last;
+		if (mock_absent_mode == MOCK_ABSENT_UAE)	/* Amiberry: 01h when the other is there */
+			return mock_drv[sel ^ 1].present ? 0x01 : 0xFF;
 		return sel == 0 ? 0xFF : 0x00;	/* open bus / device 1 absent */
+	}
 	if (d->atapi && glitch_left > 0 && mock_nien) {
 		glitch_left--;
 		return 0x00;
@@ -926,6 +936,29 @@ status()
 	if (d->stuck_bsy || d->hung)
 		return ST_BSY;
 	return r_status[sel];
+}
+
+/* a register read with the selected device absent: device 0 answering for
+ * device 1 (mock_ghost), or what the bus gives */
+static unsigned char
+absent_reg( v)
+unsigned char	v;
+{
+	if (mock_ghost && sel == 1 && mock_drv[0].present)
+		return v;
+	if (mock_absent_mode == MOCK_ABSENT_HOLD)
+		return CC.bus_last;
+	if (mock_absent_mode == MOCK_ABSENT_UAE)
+		return 0x00;
+	return 0xFF;
+}
+
+/* register writes land in a device's copy only if it is there; with
+ * mock_ghost, device 0 takes them for an absent device 1 as well */
+static int
+latches()
+{
+	return cur()->present || (mock_ghost && sel == 1 && mock_drv[0].present);
 }
 
 /* task-file access; `off' relative to the board base.  Returns 1 if handled. */
@@ -946,11 +979,12 @@ unsigned char	*vp;
 		}
 		*vp = status(); mock_intrq = 0; return 1;
 	case R_ALTSTAT:	*vp = status(); return 1;
-	case R_ERROR:	*vp = d->present ? r_error : 0xFF; return 1;
-	case R_NSECT:	*vp = d->present ? (d->atapi && glitch_left > 0 && mock_nien ? IR_COD : r_nsect) : 0xFF; return 1;
-	case R_SECT:	*vp = d->present ? r_sect  : 0xFF; return 1;
-	case R_LCYL:	*vp = d->present ? r_lcyl  : 0xFF; return 1;
-	case R_HCYL:	*vp = d->present ? r_hcyl  : 0xFF; return 1;
+	case R_ERROR:	*vp = d->present ? r_error : absent_reg( r_error); return 1;
+	case R_NSECT:	*vp = d->present ? (d->atapi && glitch_left > 0 && mock_nien ? IR_COD : r_nsect)
+				     : absent_reg( r_nsect); return 1;
+	case R_SECT:	*vp = d->present ? r_sect  : absent_reg( r_sect); return 1;
+	case R_LCYL:	*vp = d->present ? r_lcyl  : absent_reg( r_lcyl); return 1;
+	case R_HCYL:	*vp = d->present ? r_hcyl  : absent_reg( r_hcyl); return 1;
 	case R_SDH:	*vp = r_sdh; return 1;
 	}
 	return 0;
@@ -962,6 +996,7 @@ unsigned long	off;
 unsigned char	v;
 {
 	mock_taskfile_accesses++;
+	CC.bus_last = v;
 	switch (off) {
 	case R_SDH:
 		r_sdh = v;
@@ -969,10 +1004,10 @@ unsigned char	v;
 		if (sel)
 			mock_slave_selects++;
 		return 1;
-	case R_NSECT: if (cur()->present) r_nsect = v; return 1;
-	case R_SECT:  if (cur()->present) r_sect  = v; return 1;
-	case R_LCYL:  if (cur()->present) r_lcyl  = v; return 1;
-	case R_HCYL:  if (cur()->present) r_hcyl  = v; return 1;
+	case R_NSECT: if (latches()) r_nsect = v; return 1;
+	case R_SECT:  if (latches()) r_sect  = v; return 1;
+	case R_LCYL:  if (latches()) r_lcyl  = v; return 1;
+	case R_HCYL:  if (latches()) r_hcyl  = v; return 1;
 	case R_ERROR: return 1;				/* FEATURES: ignored */
 	case R_STATUS: command( v); return 1;		/* COMMAND */
 	case R_ALTSTAT:					/* CONTROL */
