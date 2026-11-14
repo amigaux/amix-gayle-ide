@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-14 — README: the buddha module's tested rows (799bd90)
+
+The tested section is rewritten from the 1.1.0-4 emulator rows on both kernel lines: root on port 0's master, on a slave alone on port 0 and on port 1's master; a Gayle root with a Buddha data disk; CD-ROMs on port 0's slave, on port 1's master and alone on port 1's slave; no Buddha and an empty Buddha; interrupts silenced mid-write on the 68040/68060 line. Emulation only, not run on a real card. The Catweasel Z-II is untested. No code change.
+
 ## 2026-11-14 — buddha 1.1.0-4 goes polled when its interrupts stop (f84f782..b1d35f1)
 
 When the watchdog gives up on a request that no interrupt served, buddha goes polled on every port for good, sets nIEN on every drive, prints `buddha: interrupts stopped, polled I/O from now on` once, and runs that request and the queued ones again polled so they complete. A request that an interrupt served before it timed out fails as before. ide_budtest has 445 checks per line. The Gayle objects are unchanged; the Gayle module still does not fall back. buddha k30 8720ae0a (16196 bytes), k46 da22bb8e (16916 bytes).
