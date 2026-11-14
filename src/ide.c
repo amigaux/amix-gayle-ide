@@ -729,6 +729,8 @@ int		bud_nboards;
 ulong		bud_intr_other;		/* INTRQs dropped on a port with no command */
 static int	bud_intron[BUD_NBOARDS];	/* the enable at 0xFC0 written */
 static int	bud_cardbd[4];		/* sd card -> board index, learnt in idequeue() */
+static ulong	bud_intr_gen;		/* ide_x.gen of the last request an interrupt served */
+ulong		bud_intr_lost;		/* interrupts stopped after the self-test: polled since */
 
 /* SCSI units per port, master and slave; 4 and 7 are not used */
 static int	bud_unit[BUD_NPORTS][2] = { { 6, 5 }, { 3, 2 }, { 1, 0 } };
@@ -839,6 +841,8 @@ bud_forget()
 	for (i = 0; i < 4; ++i)
 		bud_cardbd[i] = 0;
 	bud_nboards = 0;
+	bud_intr_gen = 0;
+	bud_intr_lost = 0;
 }
 
 #define IDE_CHAN( drive)		ide_bd = &bud_ch[(drive) >> 1]
@@ -851,6 +855,8 @@ bud_forget()
 #define IDE_DRIVE_OF( c, cp)		bud_drive_of( c, cp)
 #define IDE_INTR_OTHERS()		bud_intr_others()
 #define IDE_RESET_EXTRA()		bud_forget()
+static void	bud_timeout_finish();	/* the module section: interrupts that stopped */
+#define IDE_TIMEOUT_FINISH()		bud_timeout_finish()
 #else	/* the Gayle: one port, drive 0 the master, 1 the slave */
 #define IDE_CHAN( drive)
 #define IDE_DRV1( drive)		(drive ? IDE_SDH_DRV1 : 0)
@@ -860,6 +866,7 @@ bud_forget()
 #define IDE_DRIVE_OF( c, cp)		ide_drive_of( cp->unit)
 #define IDE_INTR_OTHERS()
 #define IDE_RESET_EXTRA()
+#define IDE_TIMEOUT_FINISH()		ide_finish( -1)
 #endif
 
 /* --------------------------------------------------- low-level helpers */
@@ -1954,7 +1961,7 @@ ide_watchdog()
 			printf( "ide%d: command timed out (status 0x%x)\n", ide_x.drive, ide_x.u->laststat);
 			ide_setsense( ide_x.u, SK_HARDWARE, ASC_LU_COMM_FAILURE, 0);
 			ide_reset_drive();		/* quiet cable before the next request starts */
-			ide_finish( -1);
+			IDE_TIMEOUT_FINISH();
 		}
 	}
 	if (ide_active || ide_qhead)
@@ -2810,7 +2817,10 @@ MOD_HDRV_WRAPPER(gayle, gayle_load, gayle_unload, gayle_halt, "Gayle IDE (A4000,
  * of them: interrupt I/O.
  * Otherwise every drive keeps nIEN, the handler is detached and the driver
  * stays polled.  The enable cannot be taken back and need not be: with
- * nIEN set no drive drives INTRQ.
+ * nIEN set no drive drives INTRQ.  If the interrupts stop later (the
+ * watchdog gives up on a request no interrupt served), the driver goes
+ * polled for good, says so once, and runs that request and the queued ones
+ * again, polled (bud_timeout_finish).
  *
  * buddha_halt() sets nIEN on every drive; buddha_unload() does too and
  * forgets the boards.
@@ -2927,12 +2937,60 @@ static int
 bud_intr2( arg)
 char	*arg;
 {
-	ulong	before, other;
+	ulong	before, other, gen;
 
 	before = ide_intr_count;
 	other  = bud_intr_other;
+	gen    = ide_x.gen;			/* the request on the cable when it came */
 	ideintr();
+	if (ide_intr_count != before)
+		bud_intr_gen = gen;
 	return ide_intr_count != before || bud_intr_other != other;
+}
+
+/*
+ * The watchdog gave up on the request on the cable (ide_watchdog: counted,
+ * said, the port reset).  When an interrupt served it, or the driver is
+ * polled already, it fails as on the Gayle (CHECK CONDITION, dd.c retries).
+ * When no interrupt came during the whole request, the interrupts have
+ * stopped after the self-test passed: from now on the driver runs polled,
+ * on every port and board (one command is on the board at a time, so the
+ * ports cannot run in different modes), nIEN is set on every drive, one
+ * console line says so, and the request and every queued one are run
+ * again, polled, in their order.  The handler stays attached and claims
+ * nothing; intr_detach() is for process context.
+ */
+static void
+bud_timeout_finish()
+{
+	struct sdcom	*cp, *q, *next;
+	struct ideunit	*u;
+
+	if (!ide_use_intr || bud_intr_gen == ide_x.gen) {
+		ide_finish( -1);
+		return;
+	}
+	ide_use_intr = 0;
+	bud_ctl_all( IDE_CTL_NIEN);
+	if (bud_intr_lost++ == 0)
+		printf( "buddha: interrupts stopped, polled I/O from now on\n");
+	cp = ide_active;
+	ide_active = 0;
+	ide_watch_ticks = 0;
+	q = ide_qhead;
+	ide_qhead = ide_qtail = 0;
+	u = ide_x.u;				/* the timeout's sense is not the request's */
+	u->skey = u->asc = u->ascq = 0;
+	u->synth = FALSE;
+	if (cp) {
+		cp->next = (struct sdcom *)q;
+		q = cp;
+	}
+	for (cp = q; cp; cp = next) {
+		next = (struct sdcom *)cp->next;
+		cp->next = 0;
+		(void) idequeue( bud_cardbd[cp->card & 3], cp);
+	}
 }
 
 /*
