@@ -109,5 +109,7 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   reads as (`mock_absent_mode`: the open bus, Amiberry's, a bus holding the last byte), a slave
   alone attached with its master never sent a command, ATA and ATAPI slaves alone through the
   self-test and interrupt I/O, `slave=0`, no ghost slave when device 0 answers for an absent
-  device 1 (`mock_ghost`); and no access outside the allowed registers in any case (the mock's own
-  counting checked first).
+  device 1 (`mock_ghost`); interrupts that stop after the self-test (the request and the queued one
+  complete with their data, polled from then on, one console line) against a hang after one
+  sector's interrupt (`hang_after`, CHECK CONDITION as before); and no access outside the allowed
+  registers in any case (the mock's own counting checked first).
