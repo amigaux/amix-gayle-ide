@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-14 — README: the Catweasel Z-II's emulator rows (785264f)
+
+The buddha module's tested table has the Catweasel Z-II's rows on both kernel lines: the root on port 0's master and on port 2's master, a data disk on port 2's master beside a Gayle root, an ATAPI CD-ROM on port 0's slave; interrupt I/O after the self-test. Not run on the Catweasel: port 1, a slave alone, interrupts that stop. Emulation only, not run on a real card. No code change.
+
 ## 2026-11-14 — README: the buddha module's tested rows (799bd90)
 
 The tested section is rewritten from the 1.1.0-4 emulator rows on both kernel lines: root on port 0's master, on a slave alone on port 0 and on port 1's master; a Gayle root with a Buddha data disk; CD-ROMs on port 0's slave, on port 1's master and alone on port 1's slave; no Buddha and an empty Buddha; interrupts silenced mid-write on the 68040/68060 line. Emulation only, not run on a real card. The Catweasel Z-II is untested. No code change.
