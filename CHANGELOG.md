@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-14 — buddha 1.1.0-4 goes polled when its interrupts stop (f84f782..b1d35f1)
+
+When the watchdog gives up on a request that no interrupt served, buddha goes polled on every port for good, sets nIEN on every drive, prints `buddha: interrupts stopped, polled I/O from now on` once, and runs that request and the queued ones again polled so they complete. A request that an interrupt served before it timed out fails as before. ide_budtest has 445 checks per line. The Gayle objects are unchanged; the Gayle module still does not fall back. buddha k30 8720ae0a (16196 bytes), k46 da22bb8e (16916 bytes).
+
 ## 2026-11-13 — buddha 1.1.0-3 attaches a drive jumpered as slave alone on a port (59ad012..4ec4a51)
 
 A port counts as present when its master answers the probe, or, when the master does not and `slave` is not 0, when its slave does; the master is addressed only where it answered. The interrupt self-test runs on that slave. The host mock models what an absent device reads as and device 0 answering for an absent device 1; ide_budtest has 411 checks per line. The Gayle objects are unchanged. buddha k30 dfe2b2ab (15884 bytes), k46 444a64b3 (16604 bytes).
