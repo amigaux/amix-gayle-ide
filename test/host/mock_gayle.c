@@ -1218,6 +1218,9 @@ unsigned long	addr;
 		if (xlba == (unsigned long)-1 || --xleft == 0) {	/* IDENTIFY or last sector */
 			xmode = 0;
 			r_status[sel] = ST_DRDY | ST_DSC;
+		} else if (cur()->hang_after && --cur()->hang_after == 0) {
+			cur()->hung = 1;			/* sectors moved, then the drive dies */
+			xmode = 0;
 		} else {
 			xlba++;
 			load_sector();

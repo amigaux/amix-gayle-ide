@@ -31,6 +31,9 @@
  *     nIEN on every port when all pass; a port that does not interrupt
  *     leaves every drive with nIEN set, the handler detached, polled I/O;
  *     an INTRQ on a port with no command is dropped by reading its STATUS;
+ *   - interrupts that stop after the self-test passed: the request and the
+ *     queued ones still complete (polled), the driver goes polled on every
+ *     port with one console line; a hang after an interrupt fails as before;
  *   - parameters (intr, slave, debug), sd_register and root_defer errors;
  *   - _halt and _unload: nIEN on every port, no command;
  *   - the layouts of a port (none, master, slave alone, both) on ports 0 and
@@ -67,6 +70,8 @@ extern unsigned long	ide_halted, ide_selftest, ide_selftest_ticks, ide_atapi_cmd
 extern int	ide_slave_enable, ide_debug, ide_intr_enable;
 extern unsigned long	bud_intr_other, bud_extra_boards, bud_base[];
 extern int	bud_nboards, bud_chok[];
+extern unsigned long	bud_intr_lost, ide_intr_timeouts;
+extern int	mock_timeouts_pending();
 
 extern int	mock_ipl;
 extern long	mock_spl_calls, mock_splx_calls;
@@ -857,6 +862,114 @@ test_ghost()
 	no_forbidden( "ghost: nothing outside the port registers");
 }
 
+/* how often `needle' is in the console */
+static int
+said( needle)
+char	*needle;
+{
+	char	*p;
+	int	n;
+
+	for (n = 0, p = mock_console; (p = strstr( p, needle)) != 0; ++p)
+		n++;
+	return n;
+}
+
+/* a READ(10) of one sector queued (interrupt I/O), not waited for */
+static void
+queue1( cp, unit, lba, buf)
+struct sdcom	*cp;
+int		unit;
+unsigned long	lba;
+char		*buf;
+{
+	memset( cp, 0, sizeof *cp);
+	cp->cdb[0] = 0x28;
+	cp->cdb[5] = lba;
+	cp->cdb[8] = 1;
+	cp->addr  = buf;
+	cp->nbyte = 512;
+	cp->unit  = unit;
+	cp->intr  = done;
+	cp->reading = 1;
+	(*sr_fn)( 0, cp);
+}
+
+/*
+ * The self-test passed, then the interrupts stop: the request on the cable
+ * and the one queued behind it still complete, with their data, once the
+ * watchdog gives up; the driver is polled from then on, nIEN set on every
+ * port, one console line; later requests complete in the call, with no
+ * watchdog and no second line.
+ */
+static void
+test_intr_stops()
+{
+	struct sdcom	cp1, cp2, cp3;
+	char		b1[512], b2[512], b3[512];
+	int		e, i;
+
+	fresh();
+	disk( 0, 0, 0, 2048L, 0xE0);
+	disk( 0, 1, 0, 2048L, 0xE1);
+	e = load_intr( (char *)0);
+	CHECK( e == 0 && ide_selftest == 1, "interrupt I/O after the self-test");
+	read1( &cp1, 0, 0, 6, 1L, b1);
+	CHECK( intr_calls == 1 && cp1.okay && marker( b1) == 0xE0, "a read through the interrupt path");
+	mock_console_reset();
+	ide_intr_timeouts = 0;
+	mock_cdrv[CAB( 0, 0)][0].mute_intrq = 1;	/* the interrupts stop */
+	ide_timeout_secs = 3;
+	intr_calls = 0;
+	queue1( &cp1, 6, 2L, b1);
+	queue1( &cp2, 3, 3L, b2);			/* queued behind it, on port 1 */
+	deliver();
+	CHECK( intr_calls == 0 && mock_timeouts_pending() == 1, "both pending, the watchdog armed");
+	for (i = 0; i <= 3 && intr_calls == 0; ++i)
+		mock_fire_timeouts();
+	CHECK( intr_calls == 2, "the watchdog's turn: both requests complete");
+	CHECK( cp1.okay && cp1.status == 0 && marker( b1) == 0xE0, "the timed-out request, run again polled: GOOD, its data");
+	CHECK( cp2.okay && cp2.status == 0 && marker( b2) == 0xE1, "the queued request, polled: GOOD, its data");
+	CHECK( ide_intr_timeouts == 1 && bud_intr_lost == 1, "one timeout, counted as interrupts stopped");
+	CHECK( said( "buddha: interrupts stopped, polled I/O from now on") == 1, "said once");
+	CHECK( mock_cnien[CAB( 0, 0)] && mock_cnien[CAB( 0, 1)], "nIEN set on every port");
+	CHECK( mock_timeouts_pending() == 0, "the watchdog disarmed");
+	CHECK( mock_spl_calls == mock_splx_calls, "spl balanced");
+	for (i = 0; i < 3; ++i) {
+		read1( &cp3, 0, 0, i == 1 ? 3 : 6, 4L + i, b3);
+		CHECK( intr_calls == 1 && cp3.okay && cp3.status == 0, "later requests complete in the call, polled");
+	}
+	CHECK( marker( b3) == 0xE0, "with their data");
+	CHECK( mock_timeouts_pending() == 0, "no watchdog for polled requests");
+	CHECK( said( "interrupts stopped") == 1 && said( "timed out") == 1, "no second line");
+	ide_timeout_secs = 20;
+	no_forbidden( "interrupts stopping: nothing outside the port registers");
+
+	/* a request an interrupt served before it timed out fails as before:
+	 * the drive hangs after the first sector of a two-sector read */
+	fresh();
+	disk( 0, 0, 0, 2048L, 0xE2);
+	e = load_intr( (char *)0);
+	CHECK( e == 0 && ide_selftest == 1, "interrupt I/O again");
+	mock_console_reset();
+	ide_timeout_secs = 3;
+	memset( &cp1, 0, sizeof cp1);
+	cp1.cdb[0] = 0x28; cp1.cdb[5] = 5; cp1.cdb[8] = 2;
+	cp1.addr = b1; cp1.nbyte = 512; cp1.unit = 6; cp1.intr = done; cp1.reading = 1;
+	intr_calls = 0;
+	mock_cdrv[CAB( 0, 0)][0].hang_after = 1;	/* one sector, then nothing */
+	(*sr_fn)( 0, &cp1);
+	deliver();
+	CHECK( intr_calls == 0 && claims > 0, "the first sector's interrupt came");
+	for (i = 0; i <= 3 && intr_calls == 0; ++i)
+		mock_fire_timeouts();
+	CHECK( intr_calls == 1 && cp1.okay && cp1.status == 0x02, "a hang after an interrupt: CHECK CONDITION, as on the Gayle");
+	CHECK( bud_intr_lost == 0 && said( "interrupts stopped") == 0, "interrupts kept");
+	CHECK( mock_cnien[CAB( 0, 0)] == 0, "nIEN still clear");
+	ide_timeout_secs = 20;
+	no_forbidden( "a hang after an interrupt: nothing outside the port registers");
+}
+
 int
 main()
 {
@@ -881,6 +994,7 @@ main()
 	fprintf( stderr, "== test_layouts\n"); test_layouts();
 	fprintf( stderr, "== test_lone_slave\n"); test_lone_slave();
 	fprintf( stderr, "== test_ghost\n"); test_ghost();
+	fprintf( stderr, "== test_intr_stops\n"); test_intr_stops();
 	fresh();
 	CHECK( forbidden_total == 0, "no forbidden board access in any case");
 	CHECK( mock_id_reads + mock_id_writes == 0, "no access to 0xDE1000");

@@ -44,6 +44,7 @@ struct mock_drive {
 	int		stuck_bsy;	/* status always BSY, even after SRST */
 	int		hung;		/* status BSY, no INTRQ, until a software reset */
 	int		hang_on_cmd;	/* accept the next READ/WRITE, then go `hung' */
+	int		hang_after;	/* READ: go `hung' after this many sectors moved (0: never) */
 	int		mute_intrq;	/* never assert INTRQ (interrupt lost) */
 	/* ATAPI CD-ROM (mock_add_cdrom) */
 	int		atapi;
