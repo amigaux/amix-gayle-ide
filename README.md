@@ -247,15 +247,30 @@ boards itself. `module/buddha/Master` says when the key changes.
 | Halt | nIEN on every drive; the board's enable cannot be cleared |
 | Console | the per-drive lines say `ide<d>` with d = 6·board + 2·port + (0 master, 1 slave) |
 
-**Tested** in the host harness: `ide_budtest`, 411 checks per line (discovery, the register map per
-port, the units of every port and drive, a slave alone, two boards, ATAPI, the interrupt self-test,
-halt and unload, no access outside the allowed registers). In emulation (Amiberry's Buddha with its
-ROM v103.17), 1.1.0-2: the root on port 0's master on both lines, and on the 68040/68060 line on
-port 1's master and on port 0's slave beside a master, interrupt I/O after the self-test; ATAPI
-CD-ROMs on port 0's slave and port 1's master mounted; a machine without a Buddha silent; a Gayle
-root keeping its disk names with a Buddha added. A slave alone was not attached there, which
-1.1.0-3 fixes; that row is still to be run again. **Not tested yet:** on a real Buddha or
-Catweasel Z-II, and the Catweasel Z-II in emulation.
+**Tested** in the host harness: `ide_budtest`, 445 checks per line (discovery, the register map per
+port, the units of every port and drive, every layout of a port including a slave alone, two boards,
+ATAPI, the interrupt self-test, interrupts that stop, halt and unload, no access outside the allowed
+registers).
+
+**Emulation only, not run on a real card.** With 1.1.0-4 under Amiberry's Buddha (its ROM v103.17,
+which boots the loader), installed from the packages, on the 68030 and the 68040/68060 kernel lines:
+
+| What | Lines | Result |
+|---|---|---|
+| root on port 0's master (`c6d0`, or `ced0` beside the Z3660 SCSI) | both | boots to multi-user, interrupt I/O after the self-test; files written, read back the same on the next boot |
+| root on a disk jumpered as slave alone on port 0 (unit 5) | both | the same |
+| root on port 1's master (unit 3) | both | the same |
+| a Gayle root with a Buddha data disk | both | the Gayle disk keeps its name; the Buddha disk mounts as its own card |
+| an ATAPI CD-ROM on port 0's slave, on port 1's master, and alone on port 1's slave | both | `cdfs` mounts it, the files' sums match |
+| no Buddha in the machine; a Buddha with no drives | both | the module says nothing and takes no card |
+| the drives' interrupts silenced in the middle of a write | 68040/68060 | `buddha: interrupts stopped, polled I/O from now on`, the write completes, polled I/O after |
+
+**Catweasel Z-II: untested.** The driver has code for its three ports (product 0x2A, units 1 and 0
+on port 2), but it has not been seen working: the emulator runs so far did not get a Catweasel. They
+set Amiberry's board model as `model=cwz2`, which Amiberry does not read (it takes the bare model
+name, `buddha_rom_options=cwz2`), so they emulated a Buddha with the Catweasel's ROM, and the disk
+on its third port was out of the driver's reach. Nothing has been run on a real Buddha or Catweasel
+Z-II.
 
 ## Hardware notes
 
