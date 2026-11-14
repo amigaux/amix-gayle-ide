@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-14 — README: known limits of the gayle module (381d22c)
+
+"Known limits of the gayle module (1.1.0-9)": a drive alone on the port as slave is not found (the probe addresses the master only); a CD-ROM alone on the port stays on polled I/O (the self-test needs an ATA drive); no fall-back to polling when interrupts stop after the self-test passed. Unchanged in 1.1.1; the buddha module has none of them. Measured on the 68040/68060 line. Docs only.
+
 ## 2026-11-14 — README: the Catweasel Z-II's emulator rows (785264f)
 
 The buddha module's tested table has the Catweasel Z-II's rows on both kernel lines: the root on port 0's master and on port 2's master, a data disk on port 2's master beside a Gayle root, an ATAPI CD-ROM on port 0's slave; interrupt I/O after the self-test. Not run on the Catweasel: port 1, a slave alone, interrupts that stop. Emulation only, not run on a real card. No code change.
