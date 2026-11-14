@@ -215,6 +215,31 @@ module rows (1.1.0-1, `intr` 0 by default) passed the same six rows polled and w
 - the module on real hardware: the A4000 rows, with interrupts by default, are a 1.1 release gate;
 - the interrupt path on a 68040/68060 on real hardware (the static 040/060 line was polled only).
 
+**Known limits of the gayle module (1.1.0-9).** As shipped in 1.1 (packages `gayle-k30` / `gayle-k46`
+1.1.0-9). Measured in emulation on the 68040/68060 line, with the root on another controller: a disk
+alone as the port's master was attached and ran on interrupts after the self-test, as expected. The
+68030 line builds the same source and behaves the same by the code, but was not measured. These limits
+are unchanged in 1.1.1, which keeps the gayle module's bytes. The `buddha` module has none of them.
+
+1. **A drive alone on the port as slave is not found.** The probe in the load entry writes and reads
+   back the task file with the master selected only (`ide_readback()`). With no master the readback
+   fails, the load ends in a silent `ENXIO`, and the module is not linked: no `ide` line, no card.
+   Measured with a disk alone as slave. A CD-ROM alone as slave is the same, and then cdfs cannot open
+   it (errno 5). Jumper a single drive as master, or fit a master beside it. The `buddha` module probes
+   the slave when the master does not answer (since 1.1.0-3).
+2. **A CD-ROM alone on the port stays on polled I/O.** It is attached and reads normally (cdfs
+   mounts it), but the console says `ide: interrupt self-test failed, polled I/O`. The self-test looks
+   for an ATA drive to give one READ VERIFY SECTOR(S), an ATA command. With only an ATAPI drive on
+   the port it finds none, so it issues no command at all and reports a failure
+   (`ide_selftest_run()`). The `buddha` module tests a port whose drive is ATAPI with IDENTIFY PACKET
+   DEVICE instead.
+3. **No fall-back when interrupts stop later.** After the self-test passes, a command whose interrupt
+   never comes is failed by the watchdog after `ide_timeout_secs` (20 s): `ideN: command timed out`,
+   a reset of the port, and CHECK CONDITION, which dd.c retries once. The module stays in interrupt
+   mode, so every later command times out the same way. It does not fall back to polling. The
+   `buddha` module does (since 1.1.0-4): `buddha: interrupts stopped, polled I/O from now on`, and
+   the waiting requests complete polled.
+
 ## The Buddha and Catweasel Z-II module
 
 The same source built with `-DIDE_BUDDHA` (`src/buddha.c`) is `buddha`, a second root-class module for
