@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-23 — README: the gayle module 1.1.0-6 measured on a real A4000 (b02a561)
+
+A4000 with a Z3660 68060 at 80 MHz, k46 -69, an SD card in an FC-1307 SD-to-CF adapter on the Gayle master; medians of 3 runs against 1.1.0-5. Raw 64 KiB: write 786 → 970 kB/s, read 902 → 1049. Raw 8 KiB: write 745 → 889, read 861 → 1002; random 8 KiB read 832 → 951. ufs: write 608 → 744, read 793 → 892. The DATA register costs 0.93 µs a word with the new loop, 1.21–1.52 µs with the old one. IDENTIFY word 47 is 1. One polled run (intr=0) read 1348 and wrote 1131 kB/s. Every verify was clean. Docs only.
+
 ## 2026-11-23 — gayle module 1.1.0-6: C4-7 limits and the whole-sector loop (f82e2a1, 251fcb3)
 
 After sd_register the module declares one segment of up to 64 KiB a command (16-aligned, whole sectors, SDL_ALLRAM, reach 0xFFFFFFFF); idequeuex runs dd's sdcomx commands on the same path and sets sx_resid. A segment list is refused. The reference is weak: kernels without the segment minor answer ENOSYS, and param limits=0 declares nothing. Full sectors go through an unrolled DATA loop, 2 instructions a word instead of 8. make -C module PROBE=1 is a measurement build, never shipped. Builds need kits k30.1.6 / k46.1.7. In emulation: k30 -79 raw writes +27-31%, reads +13-19%; k46 -69 +1-13%. Objects k30 1574420d, k46 abb85d4b; the static objects and buddha are unchanged.
