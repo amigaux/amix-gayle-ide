@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-23 — gayle module 1.1.0-6: C4-7 limits and the whole-sector loop (f82e2a1, 251fcb3)
+
+After sd_register the module declares one segment of up to 64 KiB a command (16-aligned, whole sectors, SDL_ALLRAM, reach 0xFFFFFFFF); idequeuex runs dd's sdcomx commands on the same path and sets sx_resid. A segment list is refused. The reference is weak: kernels without the segment minor answer ENOSYS, and param limits=0 declares nothing. Full sectors go through an unrolled DATA loop, 2 instructions a word instead of 8. make -C module PROBE=1 is a measurement build, never shipped. Builds need kits k30.1.6 / k46.1.7. In emulation: k30 -79 raw writes +27-31%, reads +13-19%; k46 -69 +1-13%. Objects k30 1574420d, k46 abb85d4b; the static objects and buddha are unchanged.
+
 ## 2026-11-14 — README: known limits of the gayle module (381d22c)
 
 "Known limits of the gayle module (1.1.0-9)": a drive alone on the port as slave is not found (the probe addresses the master only); a CD-ROM alone on the port stays on polled I/O (the self-test needs an ATA drive); no fall-back to polling when interrupts stop after the self-test passed. Unchanged in 1.1.1; the buddha module has none of them. Measured on the 68040/68060 line. Docs only.
