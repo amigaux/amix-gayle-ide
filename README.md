@@ -225,6 +225,25 @@ module the 1.1 packages ship (`gayle-k30` / `gayle-k46` 1.1.0-9):
   sends 2 or 4 KiB commands, so only the sector loop counts there.
 - Every cell verified clean (badreqs 0), the copied tree compared the same (278 files), fsck clean,
   no timeouts or resets.
+**Measured on a real A4000** (Z3660, 68060 at 80 MHz, k46 -69; an SD card in an FC-1307 SD-to-CF
+adapter on the Gayle master; 64 MiB raw cells and a 192 MiB ufs file, medians of 3 runs, kB/s):
+
+| Cell | 1.1.0-5 | 1.1.0-6 | 1.1.0-6, `intr=0` (1 run) |
+|---|---:|---:|---:|
+| raw write 8 KiB / 64 KiB / 1 MiB | 745 / 786 / 787 | 889 / 970 / 1002 | 1030 / 1131 / 1145 |
+| raw read 8 KiB / 64 KiB / 1 MiB | 861 / 902 / 906 | 1002 / 1049 / 1053 | 1229 / 1348 / 1365 |
+| random read 8 KiB | 832 | 951 | 1148 |
+| ufs write / read | 608 / 793 | 744 / 892 | 816 / 964 |
+
+- The DATA register costs about 0.93 µs a word with the new loop and 1.21 µs (reads) to 1.52 µs
+  (writes) with the old one (the measurement build).
+- Every verify was clean, the copied tree compared the same, fsck was clean, and five power-cycle
+  boots each wrote and verified 16 MiB.
+- The adapter reports one sector per READ/WRITE MULTIPLE block (IDENTIFY word 47), so multiple mode
+  would gain nothing on it.
+- Polled I/O is faster here because every sector costs an interrupt, but it holds level 2 (and the
+  clock tick) for a whole command; interrupt I/O stays the default.
+
 - In the emulator the drive's own time dominates: about 105 µs a sector, the same whether the
   driver waits for the interrupt or spins (the measurement build's split), so the sector loop and
   the command count show only partly. The 68030 there runs at the emulator's fastest setting, not
