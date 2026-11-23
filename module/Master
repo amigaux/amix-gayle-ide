@@ -14,7 +14,9 @@
 # after the self-test (the default), 0 = polled I/O; slave 0 never touch the
 # slave, 1 any drive, 2 ATAPI only; debug 0..2; master/slaveunit the SCSI
 # unit numbers; board 0 = the ROM decides (card.resource resident: A1200),
-# 1 = the A4000 row, 2 = the A1200 row, -1 = never probe.
+# 1 = the A4000 row, 2 = the A1200 row, -1 = never probe; limits (C4-7)
+# 1 = declare the port's limits after sd_register (64 KiB commands through
+# dd's bounce on a kernel with the segment minor), 0 = declare none.
 $modtype misc
 $class root
 $match mobo:gayle
@@ -26,5 +28,6 @@ $param debug:int:0:0:2
 $param master:int:6:0:7
 $param slaveunit:int:5:0:7
 $param board:int:0:-1:2
+$param limits:int:1:0:1
 $desc Gayle IDE (A4000, A1200), root-class disk controller
 gayle	gayle

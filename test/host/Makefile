@@ -23,6 +23,11 @@
 # `buddha') is built and run the same two ways (ide_budtest, ide_budtest_040)
 # against the mock's Buddha boards.
 #
+# The measurement build (-DIDE_PROBE, make -C module PROBE=1) of the module
+# is built and run the same two ways (ide_modtest_probe, ide_modtest_probe_040):
+# every module case with ide_pmode 0 (the shipped behaviour), then the data
+# cases again with each transfer variant switched on.
+#
 # The investigation build (-DIDE_DIAG) is built and run the same two ways as
 # well (ide_test_diag, ide_test_040_diag): the spin high-water, and on the
 # 040/060 line the ide_cache A/B switch and the push counters.  The default
@@ -41,7 +46,7 @@ DRV     := $(SRC)/ide.c
 CACHE     := -DIDE_CACHE=1 -DIDE_NBPP=4096
 DIAG      := -DIDE_DIAG=1
 STUBS     := mock_regs.h stubs/rico.h stubs/sd.h \
-             stubs/sys/types.h stubs/sys/errno.h stubs/sys/inline.h stubs/sys/param.h
+             stubs/sys/types.h stubs/sys/errno.h stubs/sys/inline.h stubs/sys/param.h stubs/sys/sdseg.h
 HOST_OBJS := $(BUILD)/mock_gayle.o $(BUILD)/kstubs.o
 BIN       := $(BUILD)/ide_test
 BIN040    := $(BUILD)/ide_test_040
@@ -51,7 +56,11 @@ DIAGBIN   := $(BUILD)/ide_test_diag
 DIAGBIN040 := $(BUILD)/ide_test_040_diag
 BUDBIN    := $(BUILD)/ide_budtest
 BUDBIN040 := $(BUILD)/ide_budtest_040
-ALLBIN    := $(BIN) $(BIN040) $(DIAGBIN) $(DIAGBIN040) $(MODBIN) $(MODBIN040) $(BUDBIN) $(BUDBIN040)
+PRBBIN    := $(BUILD)/ide_modtest_probe
+PRBBIN040 := $(BUILD)/ide_modtest_probe_040
+PROBE     := -DIDE_PROBE=1
+ALLBIN    := $(BIN) $(BIN040) $(DIAGBIN) $(DIAGBIN040) $(MODBIN) $(MODBIN040) $(BUDBIN) $(BUDBIN040) \
+             $(PRBBIN) $(PRBBIN040)
 
 .PHONY: all check clean
 all: $(ALLBIN)
@@ -79,6 +88,22 @@ $(BUILD)/ide_mod.o: $(DRV) $(STUBS)
 $(BUILD)/ide_mod_040.o: $(DRV) $(STUBS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(CACHE) -DHOST_TEST -DIDE_MODULE -Istubs -I$(SRC) -include mock_regs.h -c $(DRV) -o $@
+
+$(BUILD)/ide_mod_probe.o: $(DRV) $(STUBS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(PROBE) -DHOST_TEST -DIDE_MODULE -Istubs -I$(SRC) -include mock_regs.h -c $(DRV) -o $@
+
+$(BUILD)/ide_mod_probe_040.o: $(DRV) $(STUBS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(CACHE) $(PROBE) -DHOST_TEST -DIDE_MODULE -Istubs -I$(SRC) -include mock_regs.h -c $(DRV) -o $@
+
+$(BUILD)/ide_modtest_probe.o: ide_modtest.c mock_gayle.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(PROBE) -c $< -o $@
+
+$(BUILD)/ide_modtest_probe_040.o: ide_modtest.c mock_gayle.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(CACHE) $(PROBE) -c $< -o $@
 
 $(BUILD)/ide_bud.o: $(DRV) $(STUBS)
 	@mkdir -p $(BUILD)
@@ -130,6 +155,12 @@ $(MODBIN): $(BUILD)/ide_mod.o $(BUILD)/ide_modtest.o $(HOST_OBJS)
 $(MODBIN040): $(BUILD)/ide_mod_040.o $(BUILD)/ide_modtest_040.o $(HOST_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(PRBBIN): $(BUILD)/ide_mod_probe.o $(BUILD)/ide_modtest_probe.o $(HOST_OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(PRBBIN040): $(BUILD)/ide_mod_probe_040.o $(BUILD)/ide_modtest_probe_040.o $(HOST_OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
+
 $(BUDBIN): $(BUILD)/ide_bud.o $(BUILD)/ide_budtest.o $(HOST_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
 
@@ -145,6 +176,8 @@ check: $(ALLBIN)
 	./$(MODBIN040)
 	./$(BUDBIN)
 	./$(BUDBIN040)
+	./$(PRBBIN)
+	./$(PRBBIN040)
 
 clean:
 	rm -rf $(BUILD)

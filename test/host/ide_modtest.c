@@ -63,7 +63,13 @@ extern unsigned long	ide_intr_count, ide_intr_spurious, ide_timeout_secs;
 extern unsigned long	ide_halted, ide_selftest, ide_selftest_ticks;
 extern unsigned long	ide_atapi_cmds, ide_atapi_overrun, ide_pagecross_n;
 extern int	ide_slave_enable, ide_debug, ide_master_unit, ide_slave_unit, ide_intr_enable;
-extern int	ide_board, ide_cardres;
+extern int	ide_board, ide_cardres, ide_limits, ide_lim_rc, ide_xn;
+extern unsigned long	ide_xcmds, ide_xrefused, ide_dup_submits;
+#if IDE_PROBE
+extern unsigned long	ide_pmode, ide_spins_poll;
+extern struct { unsigned long magic, frame, t[7], n[7], cmds, reads, writes, xcmds, sectors,
+		bytes, sz[6], intrs, pollhit, pollmiss; } ide_probe;
+#endif
 extern unsigned long	ide_romtags;
 /* investigation-only symbols, defined only in an IDE_DIAG build (weak: the
  * shipping module must not have them) */
@@ -121,6 +127,39 @@ char	*base, *name;
 	sr_calls++;
 	sr_fn = fn; sr_c = c; sr_base = base; sr_name = name; sr_rank = rank;
 	return sr_ret;
+}
+
+/* C4-7: the extended command and the limits (mirror stubs/sys/sdseg.h) */
+struct sdcomx {
+	struct sdcom	sx_com;
+	unsigned short	sx_flags;
+	unsigned short	sx_nseg;
+	void		*sx_seg;
+	unsigned int	sx_resid;
+};
+struct sdlim {
+	unsigned short	sl_ver, sl_flags;
+	unsigned long	sl_maxbytes;
+	unsigned short	sl_maxseg, sl_align, sl_gran, sl_pad;
+	unsigned long	sl_reach;
+	char		(*sl_queue)();
+};
+
+static int		lim_calls, lim_ret, lim_after_sr;
+static char		(*lim_fn)();
+static unsigned		lim_c;
+static struct sdlim	*lim_l;
+
+int
+sd_limits( fn, c, l)
+char		(*fn)();
+unsigned	c;
+struct sdlim	*l;
+{
+	lim_calls++;
+	lim_fn = fn; lim_c = c; lim_l = l;
+	lim_after_sr = sr_calls;		/* sd_register calls made before it */
+	return lim_ret;
 }
 
 static int		rd_calls, rd_ret;
@@ -246,6 +285,7 @@ int	ndrives;
 	ide_romtags = 0;
 	bp_calls = bp_ret = 0; bp_addr = 0; bp_v = 0; bp_accesses_before = 0;
 	sr_calls = sr_ret = 0; sr_fn = 0; sr_base = sr_name = 0; sr_c = sr_rank = 99;
+	lim_calls = lim_ret = lim_after_sr = 0; lim_fn = 0; lim_c = 99; lim_l = 0;
 	rd_calls = rd_ret = 0; rd_fn = 0; rd_arg = (char *)1;
 	ia_calls = ia_ret = id_calls = 0; ia_fn = id_fn = 0; handler = 0;
 	claims = unclaimed = 0;
@@ -952,6 +992,152 @@ test_pagecross_quiet()
 	       "debug=1: said");
 }
 
+/* ---- C4-7: the limits and the extended commands ------------------------ */
+
+#define ENOSYS_	89
+
+/* READ(10) or WRITE(10) of `count' blocks at lba as an sdcomx through the
+ * declared sl_queue; the interrupt path is run to the end */
+static void
+xrw( x, write, lba, count, buf, nbyte, flags)
+struct sdcomx	*x;
+int		write, flags;
+unsigned long	lba;
+unsigned	count, nbyte;
+char		*buf;
+{
+	struct sdcom	*cp = &x->sx_com;
+
+	memset( x, 0, sizeof *x);
+	cp->cdb[0] = write ? 0x2A : 0x28;
+	cp->cdb[2] = lba >> 24; cp->cdb[3] = lba >> 16; cp->cdb[4] = lba >> 8; cp->cdb[5] = lba;
+	cp->cdb[7] = count >> 8; cp->cdb[8] = count;
+	cp->addr  = buf;
+	cp->nbyte = nbyte;
+	cp->unit  = 6;
+	cp->intr  = done;
+	cp->reading = !write;
+	x->sx_flags = flags;
+	x->sx_nseg = flags ? 2 : 0;
+	x->sx_resid = 12345;
+	intr_calls = 0;
+	(*lim_l->sl_queue)( 0, x);
+	deliver();
+	CHECK( mock_spl_calls == mock_splx_calls, "spl bracket balanced after the sdcomx call");
+}
+
+static void
+test_limits()
+{
+	static char	big[65536 + 4096], back[65536 + 4096];
+	struct sdcomx	x, y;
+	char		*p;
+	int		i, e;
+
+	/* the declaration, after sd_register, by default */
+	fresh( 1);
+	CHECK( gayle_load( (char *)0) == 0, "loads");
+	CHECK( lim_calls == 1, "sd_limits called once");
+	CHECK( lim_after_sr == 1, "after sd_register");
+	CHECK( lim_fn == idequeue && lim_c == 0, "names the registration (idequeue, 0)");
+	CHECK( lim_l && lim_l->sl_ver == 1 && lim_l->sl_flags == 0x0002, "version 1, SDL_ALLRAM, no SDL_SEG");
+	CHECK( lim_l && lim_l->sl_maxbytes == 65536 && lim_l->sl_maxseg == 1, "one segment of up to 64 KiB");
+	CHECK( lim_l && lim_l->sl_align == 16 && lim_l->sl_gran == 512 && lim_l->sl_pad == 0,
+	       "16-aligned, whole sectors");
+	CHECK( lim_l && lim_l->sl_reach == 0xFFFFFFFFUL && lim_l->sl_queue != 0, "reach all, a queue function");
+	CHECK( ide_limits == 1 && ide_lim_rc == 0, "accepted: ide_lim_rc 0");
+	CHECK( mock_spl_calls == 0, "the declaration takes no spl");
+
+	/* refused or absent: the load goes on */
+	fresh( 1);
+	lim_ret = ENOSYS_;
+	CHECK( gayle_load( (char *)0) == 0, "ENOSYS: still loads");
+	CHECK( ide_lim_rc == ENOSYS_, "ENOSYS kept in ide_lim_rc");
+	fresh( 1);
+	CHECK( gayle_load( "limits=0") == 0, "limits=0: loads");
+	CHECK( lim_calls == 0 && ide_limits == 0 && ide_lim_rc == -1, "limits=0: nothing declared");
+	fresh( 1);
+	CHECK( gayle_load( "limits=2") == 0, "limits=2: loads");
+	CHECK( lim_calls == 1 && ide_limits == 1, "limits=2 is out of range: the default, declared");
+
+	/* polled: 64 KiB in one command each way */
+	fresh( 1);
+	CHECK( gayle_load( "intr=0") == 0, "intr=0: loads");
+	ide_xcmds = ide_xrefused = 0;
+	p = big + (16 - ((unsigned long)big & 15)) % 16;
+	for (i = 0; i < 65536; ++i)
+		p[i] = (char)(i * 7 + (i >> 9));
+	mock_cmd_count[0x30] = mock_cmd_count[0x20] = 0;
+	xrw( &x, 1, 100L, 128, p, 65536, 0);
+	CHECK( intr_calls == 1 && x.sx_com.okay && x.sx_com.status == 0 && x.sx_resid == 0,
+	       "polled 64 KiB WRITE: done, sx_resid 0");
+	CHECK( mock_cmd_count[0x30] == 1, "polled 64 KiB WRITE: one WRITE SECTOR(S)");
+	memset( back, 0, sizeof back);
+	xrw( &y, 0, 100L, 128, back, 65536, 0);
+	CHECK( intr_calls == 1 && y.sx_com.okay && y.sx_com.status == 0 && y.sx_resid == 0,
+	       "polled 64 KiB READ: done, sx_resid 0");
+	CHECK( mock_cmd_count[0x20] == 1, "polled 64 KiB READ: one READ SECTOR(S)");
+	CHECK( memcmp( p, back, 65536) == 0, "polled: the 64 KiB read back equal");
+	CHECK( ide_xcmds == 2 && ide_xrefused == 0, "two sdcomx commands taken");
+
+	/* a segment list is refused, never run */
+	mock_cmd_count[0x20] = 0;
+	xrw( &x, 0, 100L, 8, back, 4096, 0x0001);
+	CHECK( intr_calls == 1 && !x.sx_com.okay && x.sx_resid == 4096, "SDX_SEG: refused, sx_resid nbyte");
+	CHECK( mock_cmd_count[0x20] == 0 && ide_xrefused == 1, "SDX_SEG: no ATA command, counted");
+
+	/* a failed command: sx_resid nbyte */
+	xrw( &x, 0, 4095L, 8, back, 4096, 0);
+	CHECK( intr_calls == 1 && x.sx_com.okay && x.sx_com.status == 2 && x.sx_resid == 4096,
+	       "out of range: CHECK CONDITION, sx_resid nbyte");
+
+	/* a contiguous sdcomx across a page is not a page crossing; the same
+	 * buffer as a stock command is */
+	p = big + (PG - ((unsigned long)big & (PG - 1))) % PG;	/* page-aligned */
+	ide_pagecross_n = 0;
+	xrw( &x, 0, 12L, 1, p + PG - 256, 512, 0);
+	CHECK( x.sx_com.okay && x.sx_resid == 0 && disk_equals( 0, 12L, p + PG - 256, 512),
+	       "sdcomx across a page: served");
+	CHECK( ide_pagecross_n == 0, "sdcomx across a page: not counted");
+	read1( &x.sx_com, 6, 12L, p + PG - 256);
+	CHECK( ide_pagecross_n == 1, "the stock command across the page: counted");
+	CHECK( ide_xn == 0, "polled: no sdcomx left noted");
+	p = big + (16 - ((unsigned long)big & 15)) % 16;
+
+	/* interrupt I/O: 64 KiB each way, completion from the interrupts */
+	fresh( 1);
+	e = load_intr( "intr=1");
+	CHECK( e == 0 && ide_selftest == 1, "interrupt I/O");
+	for (i = 0; i < 65536; ++i)
+		p[i] = (char)(i * 13 + 5);
+	xrw( &x, 1, 300L, 128, p, 65536, 0);
+	CHECK( intr_calls == 1 && x.sx_com.okay && x.sx_com.status == 0 && x.sx_resid == 0,
+	       "interrupt 64 KiB WRITE: done, sx_resid 0");
+	memset( back, 0, sizeof back);
+	xrw( &y, 0, 300L, 128, back, 65536, 0);
+	CHECK( intr_calls == 1 && y.sx_com.okay && y.sx_resid == 0 && memcmp( p, back, 65536) == 0,
+	       "interrupt 64 KiB READ: done, equal, sx_resid 0");
+
+	/* handed in twice while queued: completes once, noted once */
+	ide_dup_submits = 0;
+	memset( &x, 0, sizeof x);
+	x.sx_com.cdb[0] = 0x28; x.sx_com.cdb[5] = 40; x.sx_com.cdb[8] = 4;
+	x.sx_com.addr = back; x.sx_com.nbyte = 2048; x.sx_com.unit = 6; x.sx_com.intr = done;
+	intr_calls = 0;
+	(*lim_l->sl_queue)( 0, &x);
+	(*lim_l->sl_queue)( 0, &x);
+	deliver();
+	CHECK( intr_calls == 1 && x.sx_com.okay && x.sx_resid == 0 && ide_dup_submits == 1,
+	       "resubmitted while queued: one completion, sx_resid 0");
+	CHECK( ide_xn == 0, "resubmitted while queued: noted once, nothing left noted");
+	/* the table does not leak: more commands than it holds, one after another */
+	ide_xrefused = 0;
+	for (i = 0; i < 40; ++i)
+		xrw( &x, 0, (unsigned long)i, 1, back, 512, 0);
+	CHECK( ide_xrefused == 0 && x.sx_com.okay && x.sx_resid == 0, "40 commands in turn: none refused");
+	CHECK( mock_id_reads + mock_id_writes == 0, "0xDE1000 untouched");
+}
+
 int
 main()
 {
@@ -959,6 +1145,11 @@ main()
 	const char	*name = "ide_modtest (040/060: IDE_CACHE, IDE_NBPP 4096)";
 #else
 	const char	*name = "ide_modtest";
+#endif
+#if IDE_PROBE && IDE_CACHE
+	name = "ide_modtest (040/060: IDE_CACHE, IDE_NBPP 4096, IDE_PROBE)";
+#elif IDE_PROBE
+	name = "ide_modtest (IDE_PROBE)";
 #endif
 	fprintf( stderr, "== test_chipset_gate\n"); test_chipset_gate();
 	fprintf( stderr, "== test_bprobe_fault\n"); test_bprobe_fault();
@@ -975,6 +1166,31 @@ main()
 	fprintf( stderr, "== test_errors\n"); test_errors();
 	fprintf( stderr, "== test_atapi_slave\n"); test_atapi_slave();
 	fprintf( stderr, "== test_pagecross_quiet\n"); test_pagecross_quiet();
+	fprintf( stderr, "== test_limits\n"); test_limits();
+#if IDE_PROBE
+	/* the measurement build: the data cases again with each variant on */
+	{
+		static unsigned long	modes[] = { 1, 2, 3, 4, 7 };
+		unsigned	m;
+
+		CHECK( ide_probe.magic == 0x49445052UL, "probe: magic IDPR");
+		CHECK( ide_probe.cmds > 0 && ide_probe.reads > 0 && ide_probe.writes > 0,
+		       "probe: READ/WRITE commands counted");
+		for (m = 0; m < sizeof modes / sizeof modes[0]; ++m) {
+			ide_pmode = modes[m];
+			fprintf( stderr, "== pmode %lu\n", ide_pmode);
+			test_register_polled();
+			test_atapi_slave();
+			test_pagecross_quiet();
+			if (ide_pmode & 4)
+				continue;	/* bit 2 completes in the call: the queue cases expect otherwise */
+			test_intr_selftest_pass();
+			test_limits();
+		}
+		CHECK( ide_probe.pollhit > 0, "probe: bit 1 found sectors without an interrupt");
+		ide_pmode = 0;
+	}
+#endif
 	fresh( 0);
 	CHECK( id_total == 0, "no access to 0xDE1000 on any module path");
 	CHECK( &ide_spins_hw == 0, "no ide_spins_hw in the module");

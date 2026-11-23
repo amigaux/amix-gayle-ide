@@ -94,6 +94,10 @@
 #include	"sys/inline.h"		/* spl2()/splx() */
 #include	"rico.h"
 #include	"sd.h"
+#if defined(IDE_MODULE) && !IDE_BUDDHA
+#include	"sys/sdseg.h"		/* C4-7: struct sdcomx, sd_limits (kits k30.1.6 /
+					 * k46.1.7); test/host/stubs under HOST_TEST */
+#endif
 
 extern int	printf();
 extern int	timeout();
@@ -349,6 +353,159 @@ ulong	ide_pagecross_n;		/* raw (<= IDE_NBPP) requests spanning two pages */
 #define RW( a)		(*(volatile ushort *)(a))
 #define WW( a, v)	(*(volatile ushort *)(a) = (ushort)(v))
 #endif
+
+/* ------------------------------------------------ measurement build */
+
+/*
+ * IDE_GMOD: the `gayle' module (not the static driver, not `buddha', whose
+ * objects keep their bytes).  The C4-7 entry and the measurement build below
+ * exist only there.
+ */
+#if defined(IDE_MODULE) && !IDE_BUDDHA
+#define IDE_GMOD	1
+#else
+#define IDE_GMOD	0
+#endif
+#if IDE_PROBE && !IDE_GMOD
+#error "IDE_PROBE is a build of the gayle module only"
+#endif
+
+#if IDE_PROBE
+/*
+ * Measurement build only (make -C module PROBE=1, -DIDE_PROBE; never in a
+ * shipped object): where the driver's time goes, kmem-readable as
+ * `modadmin -p ide_probe:38'.  Every moment from the first command on is
+ * charged to one category, the one the driver is in:
+ *   A  above the driver: no command on the cable, the driver not running
+ *      (sd/dd/physio, the copies, the program; other work of the box);
+ *   Q  idequeue() and ide_start()/ide_issue() outside P and W: the CDB, the
+ *      task file, the queue (process context, or nested in C);
+ *   P  ide_pio_in()/ide_pio_out(): the DATA register loop of one sector;
+ *   W  the polled waits ide_wait()/ide_wait_drq(): spinning on STATUS;
+ *   I  ideintr() for an interrupt that is ours, outside P, W and C;
+ *   S  a command on the cable and the driver waiting for its interrupt: the
+ *      drive's time plus the interrupt's way to ideintr();
+ *   C  the completion call (*cp->intr)(cp): dd's done routine, iodone, the
+ *      wakeup, and dd starting its next buffer.
+ * Times are colour clocks of the beam counter (VPOSR/VHPOSR: 227 a line,
+ * 281.94 ns on PAL), each interval under a frame.  An interval across two
+ * clock ticks or more (only at level 0: the tick is a level-2 interrupt) is
+ * taken from lbolt instead, ticks * (frame clocks * 50 / HZ), and counted in
+ * nlong.  Read the counters before and after a cell and take differences.
+ * ide_pmode (kmem) selects transfer variants for A/B cells in one boot; 0 is
+ * the module before 1.1.0-6, 1 the shipped module:
+ *   bit 0  the whole-sector DATA loop ide_pio_*_fast() (always on in the
+ *          shipped module);
+ *   bit 1  ideintr() looks a moment (ide_spins_poll ALTSTAT reads) for the
+ *          next sector, or a write's final status, before it returns to
+ *          wait for the next interrupt;
+ *   bit 2  polled commands while interrupts are on (no queue; the drive's
+ *          INTRQ stays enabled and is dropped by the polled STATUS reads).
+ */
+#define IDE_PC_A	0
+#define IDE_PC_Q	1
+#define IDE_PC_P	2
+#define IDE_PC_W	3
+#define IDE_PC_I	4
+#define IDE_PC_S	5
+#define IDE_PC_C	6
+#define IDE_NPC		7
+struct ide_probe {
+	ulong	magic;			/*   0: 0x49445052 "IDPR"                    */
+	ulong	frame;			/*   4: colour clocks a frame (313 or 263 lines) */
+	ulong	t[IDE_NPC];		/*   8: colour clocks in A Q P W I S C       */
+	ulong	n[IDE_NPC];		/*  36: entries into each                    */
+	ulong	cmds, reads, writes;	/*  64: READ/WRITE commands; of them READs, WRITEs */
+	ulong	xcmds;			/*  76: of them through idequeuex (C4-7)     */
+	ulong	sectors;		/*  80: sectors through the DATA register    */
+	ulong	bytes;			/*  84: READ/WRITE bytes (cp->nbyte)          */
+	ulong	sz[6];			/*  88: by nbyte: <=512, <=2K, <=4K, <=8K, <=64K, more */
+	ulong	intrs;			/* 112: ideintr() entries that were ours     */
+	ulong	pollhit, pollmiss;	/* 116: bit 1: sectors or ends found by the look; looks that ran out */
+	ulong	nlong;			/* 124: intervals taken from lbolt           */
+	ulong	other;			/* 128: commands that are not READ/WRITE     */
+	ulong	hz;			/* 132: HZ                                   */
+	ulong	pad[4];			/* 136                                       */
+};					/* 152 bytes = 38 longs */
+struct ide_probe	ide_probe = { 0x49445052 };
+ulong	ide_pmode;			/* kmem: the variant bits above */
+ulong	ide_spins_poll = 64;		/* kmem: bit 1's look, ALTSTAT reads */
+static int	ide_pcur;		/* the category being charged */
+static ulong	ide_plast, ide_plbolt;	/* the last mark: beam position, lbolt */
+#ifdef HOST_TEST
+static long	lbolt;			/* the harness has no clock: every time 0 */
+#define IDE_BEAM( r)	0
+#else
+extern long	lbolt;
+#define IDE_BEAM( r)	RW( r)
+#endif
+
+/* The beam position in colour clocks since the top of the frame. */
+static ulong
+ide_pnow()
+{
+	ushort	p, h, p2;
+
+	p  = IDE_BEAM( 0xDFF004L);
+	h  = IDE_BEAM( 0xDFF006L);
+	p2 = IDE_BEAM( 0xDFF004L);
+	if ((p ^ p2) & 1) {		/* line 255 -> 256 between the reads */
+		h = IDE_BEAM( 0xDFF006L);
+		p = p2;
+	}
+	if (ide_probe.frame == 0) {
+		ide_probe.frame = ((p & 0x1000) ? 263L : 313L) * 227L;
+		ide_probe.hz = HZ;
+	}
+	return (((ulong)(p & 1) << 8) | (ulong)(h >> 8)) * 227L + (ulong)(h & 0xFF);
+}
+
+/* Charge the time since the last mark to the current category, enter `c';
+ * returns the category left, for the caller to go back to. */
+static int
+ide_pcat( c)
+int	c;
+{
+	ulong	now, d, tk;
+	int	old;
+
+	now = ide_pnow();
+	tk  = (ulong)lbolt - ide_plbolt;
+	if (tk >= 2) {
+		d = tk * (ide_probe.frame * 50L / HZ);
+		ide_probe.nlong++;
+	} else
+		d = (now + ide_probe.frame - ide_plast) % ide_probe.frame;
+	ide_probe.t[ide_pcur] += d;
+	ide_probe.n[c]++;
+	old = ide_pcur;
+	ide_pcur = c;
+	ide_plast = now;
+	ide_plbolt = (ulong)lbolt;
+	return old;
+}
+#define IDE_PDECL		int pv;
+#define IDE_PSET( v, c)		((v) = ide_pcat( c))
+#define IDE_PBACK( v)		((void) ide_pcat( v))
+#define IDE_V_FASTPIO		(ide_pmode & 1)
+#define IDE_V_POLL		(ide_pmode & 2)
+#define IDE_V_NOQ		((ide_pmode & 4) && ide_active == 0 && ide_qhead == 0)
+#else
+#define IDE_PDECL
+#define IDE_PSET( v, c)
+#define IDE_PBACK( v)
+#define IDE_V_FASTPIO		IDE_GMOD	/* the module's sector loop (measured: README) */
+#define IDE_V_POLL		0
+#define IDE_V_NOQ		0
+#endif	/* IDE_PROBE */
+/* the variants a build compiles at all (IDE_V_* says whether one runs) */
+#if IDE_PROBE || IDE_GMOD
+#define IDE_X_FASTPIO		1
+#else
+#define IDE_X_FASTPIO		0
+#endif
+#define IDE_X_POLL		IDE_PROBE
+#define IDE_X_NOQ		IDE_PROBE
 
 /* -------------------------------------------- 68040/68060 data cache */
 
@@ -883,11 +1040,13 @@ uint	mask, want;
 ulong	spins;
 {
 	int	st;
+	IDE_PDECL
 #if IDE_DIAG
 	ulong	n;
 
 	n = spins;
 #endif
+	IDE_PSET( pv, IDE_PC_W);
 	do {
 		st = TR( IDE_REG_STATUS);
 		if ((st & mask) == want) {
@@ -895,9 +1054,11 @@ ulong	spins;
 			if (n - spins > ide_spins_hw)
 				ide_spins_hw = n - spins;
 #endif
+			IDE_PBACK( pv);
 			return st;
 		}
 	} while (spins-- != 0);
+	IDE_PBACK( pv);
 	return -1;
 }
 
@@ -907,11 +1068,13 @@ ide_wait_drq( spins)
 ulong	spins;
 {
 	int	st;
+	IDE_PDECL
 #if IDE_DIAG
 	ulong	n;
 
 	n = spins;
 #endif
+	IDE_PSET( pv, IDE_PC_W);
 	do {
 		st = TR( IDE_REG_STATUS);
 		if (!(st & IDE_ST_BSY) && (st & (IDE_ST_DRQ | IDE_ST_ERR | IDE_ST_DF))) {
@@ -919,9 +1082,11 @@ ulong	spins;
 			if (n - spins > ide_spins_hw)
 				ide_spins_hw = n - spins;
 #endif
+			IDE_PBACK( pv);
 			return st;
 		}
 	} while (spins-- != 0);
+	IDE_PBACK( pv);
 	return -1;
 }
 
@@ -983,6 +1148,42 @@ int		st, write;
 		printf( "ide%d: ATA error status 0x%x error 0x%x\n", (int)(u - ideunits), st, er);
 }
 
+#if IDE_X_FASTPIO
+/*
+ * A whole sector through the DATA register with nothing else in the loop:
+ * the port's address in a register, eight word moves an iteration
+ * (move.w (an),(am)+), no byte count to test per word.  The sector data
+ * needs no swap (IDE_DATA_SWAP 0).
+ */
+static void
+ide_pio_in_fast( buf)
+register ushort	*buf;
+{
+	register ulong	dp;
+	register int	i;
+
+	dp = ide_bd->base + IDE_REG_DATA;
+	for (i = IDE_SECTOR / 16; i > 0; --i) {
+		*buf++ = RW( dp); *buf++ = RW( dp); *buf++ = RW( dp); *buf++ = RW( dp);
+		*buf++ = RW( dp); *buf++ = RW( dp); *buf++ = RW( dp); *buf++ = RW( dp);
+	}
+}
+
+static void
+ide_pio_out_fast( buf)
+register ushort	*buf;
+{
+	register ulong	dp;
+	register int	i;
+
+	dp = ide_bd->base + IDE_REG_DATA;
+	for (i = IDE_SECTOR / 16; i > 0; --i) {
+		WW( dp, *buf++); WW( dp, *buf++); WW( dp, *buf++); WW( dp, *buf++);
+		WW( dp, *buf++); WW( dp, *buf++); WW( dp, *buf++); WW( dp, *buf++);
+	}
+}
+#endif	/* IDE_X_FASTPIO */
+
 /*
  * Move one 512-byte sector through the DATA register.  `nwords' < 256 keeps
  * the transfer with the drive complete while storing only what fits nbyte.
@@ -994,7 +1195,19 @@ int	nwords;
 {
 	int	i;
 	ushort	w;
+	IDE_PDECL
 
+	IDE_PSET( pv, IDE_PC_P);
+#if IDE_PROBE
+	ide_probe.sectors++;
+#endif
+#if IDE_X_FASTPIO
+	if (nwords == IDE_SECTOR / 2 && IDE_V_FASTPIO) {
+		ide_pio_in_fast( buf);
+		IDE_PBACK( pv);
+		return;
+	}
+#endif
 	for (i = 0; i < IDE_SECTOR / 2; ++i) {
 		w = TRW();
 		if (i < nwords) {
@@ -1004,6 +1217,7 @@ int	nwords;
 			buf[i] = w;
 		}
 	}
+	IDE_PBACK( pv);
 }
 
 static void
@@ -1013,7 +1227,19 @@ int	nwords;
 {
 	int	i;
 	ushort	w;
+	IDE_PDECL
 
+	IDE_PSET( pv, IDE_PC_P);
+#if IDE_PROBE
+	ide_probe.sectors++;
+#endif
+#if IDE_X_FASTPIO
+	if (nwords == IDE_SECTOR / 2 && IDE_V_FASTPIO) {
+		ide_pio_out_fast( buf);
+		IDE_PBACK( pv);
+		return;
+	}
+#endif
 	for (i = 0; i < IDE_SECTOR / 2; ++i) {
 		w = i < nwords ? buf[i] : 0;
 #if IDE_DATA_SWAP
@@ -1021,6 +1247,7 @@ int	nwords;
 #endif
 		TWW( w);
 	}
+	IDE_PBACK( pv);
 }
 
 /* -------------------------------------------------------- IDENTIFY */
@@ -1382,6 +1609,57 @@ static uint		ide_cq_head, ide_cq_tail;
 static int		ide_completing;
 ulong			ide_cq_overflow;	/* completions delivered nested because the FIFO was full */
 
+#if IDE_GMOD
+/*
+ * C4-7 (kernel/dlm docs/contracts/C4-7-sd-segments.md): the kernel's one-
+ * segment commands of up to 64 KiB (struct sdcomx) come in through
+ * idequeuex(), the stock ones through idequeue(), and the two forms are
+ * told apart by the entry alone.  idequeuex() notes its command in
+ * ide_xtab; the completion sets sx_resid for a noted one before cp->intr:
+ * 0 when the command moved its data, nbyte when it failed or ended in CHECK
+ * CONDITION (all or nothing, as C4-7 2.2 allows).  At sdspl.
+ */
+#define IDE_XMAX	32		/* sdcomx commands queued or on the cable */
+static struct sdcom	*ide_xtab[IDE_XMAX];
+int		ide_xn;		/* kmem: entries in use (0 when the port is idle) */
+ulong	ide_xcmds;			/* kmem: sdcomx commands taken */
+ulong	ide_xrefused;			/* kmem: refused (a segment list, or ide_xtab full) */
+
+static void
+ide_xdone( cp)
+struct sdcom	*cp;
+{
+	int	k;
+
+	if (ide_xn == 0)
+		return;
+	for (k = 0; k < IDE_XMAX; ++k)
+		if (ide_xtab[k] == cp) {
+			ide_xtab[k] = 0;
+			ide_xn--;
+			((struct sdcomx *)cp)->sx_resid =
+				(cp->okay && cp->status == SC_GOOD) ? 0 : cp->nbyte;
+			return;
+		}
+}
+
+/* Is cp an sdcomx that idequeuex() took (at sdspl)? */
+static int
+ide_xnoted( cp)
+struct sdcom	*cp;
+{
+	int	k;
+
+	for (k = 0; ide_xn != 0 && k < IDE_XMAX; ++k)
+		if (ide_xtab[k] == cp)
+			return 1;
+	return 0;
+}
+#define IDE_XDONE( cp)	ide_xdone( cp)
+#else
+#define IDE_XDONE( cp)
+#endif
+
 static void
 ide_complete( cp)
 struct sdcom	*cp;
@@ -1389,14 +1667,18 @@ struct sdcom	*cp;
 	struct sdcom	*p;
 	uint		nt;
 	int		s;
+	IDE_PDECL
 
 	s = sdspl();
 	nt = (ide_cq_tail + 1) & (IDE_CQ - 1);
 	if (nt == ide_cq_head) {		/* full: deliver now rather than lose it */
 		if (ide_cq_overflow++ == 0)
 			printf( "ide: completion queue full, delivering directly\n");
+		IDE_XDONE( cp);
 		splx( s);
+		IDE_PSET( pv, IDE_PC_C);
 		(*cp->intr)( cp);
+		IDE_PBACK( pv);
 		return;
 	}
 	ide_cq[ide_cq_tail] = cp;
@@ -1409,8 +1691,11 @@ struct sdcom	*cp;
 	while (ide_cq_head != ide_cq_tail) {
 		p = ide_cq[ide_cq_head];
 		ide_cq_head = (ide_cq_head + 1) & (IDE_CQ - 1);
+		IDE_XDONE( p);
 		splx( s);
+		IDE_PSET( pv, IDE_PC_C);
 		(*p->intr)( p);
+		IDE_PBACK( pv);
 		s = sdspl();
 	}
 	ide_completing = 0;
@@ -1443,6 +1728,21 @@ static struct {
 } ide_x;
 static int	ide_watch_armed;
 static ulong	ide_watch_ticks, ide_watch_gen;
+
+#if IDE_PROBE
+/* Leave an entry point: back to the category it interrupted, or, from the
+ * top (A or S), to S while a command is on the cable, else A. */
+static void
+ide_pleave( old)
+int	old;
+{
+	(void) ide_pcat( (old == IDE_PC_A || old == IDE_PC_S)
+			 ? (ide_active ? IDE_PC_S : IDE_PC_A) : old);
+}
+#define IDE_PLEAVE( v)	ide_pleave( v)
+#else
+#define IDE_PLEAVE( v)
+#endif
 
 static void	ide_start();
 static void	ide_watchdog();
@@ -1865,13 +2165,57 @@ ide_start()
 	ide_issue();
 }
 
+#if IDE_X_POLL
+/*
+ * After a sector of an interrupt-driven READ/WRITE, look a moment for the
+ * drive to be ready again (the next sector's DRQ, or a WRITE's final
+ * status) instead of returning to wait for its interrupt: the 400 ns settle,
+ * then at most ide_spins_poll ALTSTAT reads for BSY clear.  Found: STATUS is
+ * read, which drops the INTRQ the drive raised for it (an INT2 already
+ * latched for it then finds the mirror clear and returns), the Gayle latch is
+ * acknowledged where there is one, and the status returned.  Not found: -1,
+ * and the interrupt comes as it always does.
+ */
+static int
+ide_look()
+{
+	ulong	n;
+	int	st;
+	IDE_PDECL
+
+	IDE_PSET( pv, IDE_PC_W);
+	ide_settle();
+	for (n = ide_spins_poll; n != 0; --n)
+		if (!(TR( IDE_REG_ALTSTAT) & IDE_ST_BSY)) {
+			st = TR( IDE_REG_STATUS);
+			ide_irq_ack( ide_bd);
+#if IDE_PROBE
+			ide_probe.pollhit++;
+#endif
+			IDE_PBACK( pv);
+			return st;
+		}
+#if IDE_PROBE
+	ide_probe.pollmiss++;
+#endif
+	IDE_PBACK( pv);
+	return -1;
+}
+#endif	/* IDE_X_POLL */
+
 /*
  * Level-2 handler (int2_tbl[]).  The dispatcher has already cleared INTREQ
  * PORTS; we test the board's own status bit and return quietly when the
  * interrupt is not ours (INT2 is shared with CIA-A and Zorro II).
  */
+#if IDE_PROBE
+static void	ide_intr_body();
+#define IDE_INTR_NAME	ide_intr_body	/* ideintr() is the probe's wrapper, below */
+#else
+#define IDE_INTR_NAME	ideintr
+#endif
 void
-ideintr()
+IDE_INTR_NAME()
 {
 	int	st, i;
 
@@ -1904,6 +2248,9 @@ ideintr()
 		return;
 	}
 	if (ide_x.cmdleft > 0) {
+#if IDE_X_POLL
+	    for (;;) {
+#endif
 		if (!(st & IDE_ST_DRQ)) {
 			st = ide_wait_drq( ide_spins_short);
 			if (st < 0 || (st & (IDE_ST_ERR | IDE_ST_DF))) {
@@ -1916,8 +2263,23 @@ ideintr()
 			}
 		}
 		ide_xfer_sector();
+#if IDE_X_POLL
+		if (ide_x.cmdleft == 0 && !ide_x.write)
+			break;			/* a READ's last sector: its end below */
+		if (!IDE_V_POLL || (st = ide_look()) < 0)
+			return;			/* the interrupt will come */
+		if (st & (IDE_ST_ERR | IDE_ST_DF)) {
+			ide_ataerror( ide_x.u, st, ide_x.write);
+			ide_finish( -1);
+			return;
+		}
+		if (ide_x.cmdleft == 0)
+			break;			/* a WRITE's final status: its end below */
+	    }
+#else
 		if (ide_x.cmdleft > 0 || ide_x.write)
 			return;			/* more sectors, or the write's final interrupt is due */
+#endif
 	}
 	/* command complete: settle, check the final status */
 	st = ide_wait( IDE_ST_BSY, 0, ide_spins_short);
@@ -1938,6 +2300,24 @@ ideintr()
 	else
 		ide_finish( 0);
 }
+
+#if IDE_PROBE
+/* The probe's level-2 entry: the time in the handler is I (an interrupt that
+ * is not ours costs its pending test there too), `intrs' counts ours. */
+void
+ideintr()
+{
+	ulong	before;
+	int	pv;
+
+	before = ide_intr_count;
+	pv = ide_pcat( IDE_PC_I);
+	ide_intr_body();
+	if (ide_intr_count != before)
+		ide_probe.intrs++;
+	ide_pleave( pv);
+}
+#endif
 
 /*
  * Clock callout, once per second while interrupt-driven requests exist.  A
@@ -2001,8 +2381,14 @@ uint	unit;
  * Second argument `c' is the card index sd.c registered us with (always 0 from
  * the probe path); unused.
  */
+#if IDE_PROBE
+static bool	ide_queue_body();
+#define IDE_QUEUE_NAME	ide_queue_body	/* idequeue() is the probe's wrapper, below */
+#else
+#define IDE_QUEUE_NAME	idequeue
+#endif
 bool
-idequeue( c, cp)
+IDE_QUEUE_NAME( c, cp)
 int		c;
 struct sdcom	*cp;
 {
@@ -2215,7 +2601,12 @@ struct sdcom	*cp;
 			break;
 		}
 		if ((ulong)cp->nbyte <= IDE_NBPP
-		    && (((ulong)data ^ ((ulong)data + cp->nbyte - 1)) & ~(IDE_NBPP - 1))) {
+		    && (((ulong)data ^ ((ulong)data + cp->nbyte - 1)) & ~(IDE_NBPP - 1))
+#if IDE_GMOD
+		    /* a C4-7 command's segment is contiguous by contract (2.1) */
+		    && !ide_xnoted( cp)
+#endif
+		    ) {
 #ifdef IDE_MODULE
 			/* counted, said only with debug: the one crossing seen at
 			 * boot is sdpart.c's RDB read into a kernel static, which
@@ -2232,7 +2623,7 @@ struct sdcom	*cp;
 			cp->status = SC_CHECK;
 			break;
 		}
-		if (ide_use_intr) {
+		if (ide_use_intr && !IDE_V_NOQ) {
 			ide_enqueue( cp);
 			if (ide_active == 0)
 				ide_start();
@@ -2255,6 +2646,94 @@ struct sdcom	*cp;
 	ide_complete( cp);
 	return TRUE;
 }
+
+#if IDE_PROBE
+/* The probe's queue entry: the time inside is Q (P and W apart), and the
+ * READ/WRITE commands are counted by size. */
+bool
+idequeue( c, cp)
+int		c;
+struct sdcom	*cp;
+{
+	ulong	n;
+	int	pv, op;
+	bool	r;
+
+	pv = ide_pcat( IDE_PC_Q);
+	op = cp->cdb[0];
+	if (op == SC_READ10 || op == SC_WRITE10 || op == SC_READ6 || op == SC_WRITE6) {
+		n = (ulong)cp->nbyte;
+		ide_probe.cmds++;
+		if (op == SC_READ10 || op == SC_READ6)
+			ide_probe.reads++;
+		else
+			ide_probe.writes++;
+		ide_probe.bytes += n;
+		ide_probe.sz[n <= 512 ? 0 : n <= 2048 ? 1 : n <= 4096 ? 2
+			     : n <= 8192 ? 3 : n <= 65536 ? 4 : 5]++;
+	} else
+		ide_probe.other++;
+	r = ide_queue_body( c, cp);
+	ide_pleave( pv);
+	return r;
+}
+#endif	/* IDE_PROBE */
+
+#if IDE_GMOD
+/*
+ * C4-7 section 3: the extended commands, through sl_queue.  Declared without
+ * SDL_SEG (the data moves through one DATA register, one buffer at a time),
+ * so dd sends one segment of up to 64 KiB from its bounce region, as an
+ * sdcomx without SDX_SEG; one with the flag is refused (okay false,
+ * sx_resid nbyte), never run, and so is one that finds ide_xtab full.  The
+ * command itself is the stock part, run by idequeue(); ide_xdone() sets
+ * sx_resid before the completion.  dd may hand the same command in again
+ * while it is queued (idequeue() ignores that, ide_dup_submits): it is noted
+ * once.
+ */
+bool
+idequeuex( c, cpx)
+int		c;
+struct sdcomx	*cpx;
+{
+	struct sdcom	*cp;
+	int		k, s, f;
+
+	cp = &cpx->sx_com;
+	s = sdspl();
+	f = IDE_XMAX;
+	if (!(cpx->sx_flags & SDX_SEG)) {
+		for (k = 0; k < IDE_XMAX; ++k)
+			if (ide_xtab[k] == cp)
+				break;
+			else if (ide_xtab[k] == 0 && f == IDE_XMAX)
+				f = k;
+		if (k < IDE_XMAX)
+			f = k;			/* noted already: in flight */
+		else if (f < IDE_XMAX) {
+			cpx->sx_resid = cp->nbyte;
+			ide_xtab[f] = cp;
+			ide_xn++;
+		}
+	}
+	if (f == IDE_XMAX) {
+		ide_xrefused++;
+		splx( s);
+		cpx->sx_resid = cp->nbyte;
+		cp->status = SC_CHECK;
+		cp->okay = FALSE;
+		ide_complete( cp);
+		return TRUE;
+	}
+	ide_xcmds++;
+#if IDE_PROBE
+	ide_probe.xcmds++;
+#endif
+	splx( s);
+	(void) idequeue( c, cp);
+	return TRUE;
+}
+#endif	/* IDE_GMOD */
 
 /* ------------------------------------------------------------- probe */
 
@@ -2684,6 +3163,26 @@ char	*arg;
 	return 0;
 }
 
+/*
+ * C4-7 section 6: the port's limits, declared after sd_register.  The data
+ * moves through the CPU, so the port reaches whatever RAM the CPU does
+ * (SDL_ALLRAM, reach 0xFFFFFFFF), takes one segment (no SDL_SEG), and up to
+ * 64 KiB a command: 128 sectors, one READ/WRITE SECTOR(S).  Alignment 16
+ * (the 040/060 cache line: the buffer's edge lines are never shared),
+ * length a multiple of 512 (whole sectors).  The reference is weak
+ * (DDI_SD_LIMITS): on a kernel before the segment minor the call gives
+ * ENOSYS and the port keeps today's commands; param limits=0 declares
+ * nothing.  ide_lim_rc: -1 not called, else sd_limits' result (0 accepted).
+ */
+#ifndef HOST_TEST
+DDI_SD_LIMITS_DECL;
+#endif
+static struct sdlim	ide_lim = {
+	SDLIM_VER, SDL_ALLRAM, 65536L, 1, 16, 512, 0, 0xFFFFFFFFL, idequeuex
+};
+int	ide_limits = 1;			/* kmem: the limits parameter (0 = declare none) */
+int	ide_lim_rc = -1;		/* kmem: sd_limits' result, -1 = not called */
+
 /* The load entry, in the root pass (see the block comment above). */
 int
 gayle_load( params)
@@ -2731,6 +3230,10 @@ char	*params;
 		idereset();
 		return e;
 	}
+	ide_limits = gayle_iparam( params, "limits", 1, 0, 1);
+	ide_lim_rc = -1;
+	if (ide_limits)
+		ide_lim_rc = DDI_SD_LIMITS( idequeue, 0, &ide_lim);
 	printf( "ide: %s at 0x%x, polled I/O\n", ide_bd->name, (int)ide_bd->base);
 	if (ide_intr_enable) {
 		e = root_defer( gayle_defer, (char *)0);

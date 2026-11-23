@@ -18,12 +18,18 @@
 #                             spin high-water and, on k46, the data-cache A/B
 #                             switch and its counters; under build/<line>-diag,
 #                             never for shipping
+#   make -C module PROBE=1    a measurement build (-DIDE_PROBE): the time
+#                             split ide_probe and the transfer variants
+#                             ide_pmode; under build/<line>-probe, never for
+#                             shipping
 #
 # DLM is the amix-dlm checkout whose kits are built (`make kit` there gives
 # build/kit/k30 and build/kit/k46); KIT_k30 / KIT_k46 name a kit directly.
 # amix-dlm now lives in the amigaux/amix repository as kernel/dlm, so the
 # default is ../amix/kernel/dlm, or ../amix-dlm where only that exists.
-# The kits must be kabi k30.1.2 / k46.1.2 or later (root_defer on k30); for
+# The kits must carry sys/sdseg.h, kabi k30.1.6 / k46.1.7 or later (the C4-7
+# limits; the module still imports only k30.1.2 / k46.1.2 names, sd_limits
+# being weak, so it loads on every module kernel); for
 # buddha the kit's motherboard registry must also list `buddha' (amix
 # f00b5fef or later), the stand-in key its Master names.
 # The pinned cross tools (m68k-cbm-sysv4-*) and python3 must be on PATH.
@@ -65,8 +71,8 @@ else	# one line, the kit's
 
 MODULE = gayle
 OBJS   = ide.o
-DIAGFLAGS = $(if $(filter-out 0,$(DIAG)),-DIDE_DIAG=1)
-MODOUT = $(TOP)/build/$(LINE)$(if $(DIAGFLAGS),-diag)
+DIAGFLAGS = $(if $(filter-out 0,$(DIAG)),-DIDE_DIAG=1)$(if $(filter-out 0,$(PROBE)), -DIDE_PROBE=1)
+MODOUT = $(TOP)/build/$(LINE)$(if $(filter-out 0,$(DIAG)),-diag)$(if $(filter-out 0,$(PROBE)),-probe)
 SRC    = $(TOP)/src
 ALIEN  = -I$(KIT)/stock/usr/sys/amiga/alien
 # the 68040/68060 line: the data-cache maintenance, 4 KiB pages, x4 spin budgets
