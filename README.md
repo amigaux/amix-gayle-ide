@@ -63,7 +63,7 @@ login works. To my knowledge the first Amix boot on an A4000 with root on IDE.
 - ✅ **Host harness** — the unmodified driver source against a mock Gayle/ATA model with an ATAPI
   CD-ROM, built twice: the 68030 object (1236 checks) and the 68040/68060 one (1556 checks, cache
   and ordering included); the diagnostic build (`-DIDE_DIAG`) the same two ways (1253 / 1576
-  checks); the loadable module form the same two ways (361 / 362 checks).
+  checks); the loadable module form the same two ways (448 / 449 checks), its measurement build (1232 / 1233).
 - 🟡 **Board table** — A4000 entry proven; A1200/A600 entries (task file `0xDA0000`, latched INTREQ,
   Gayle ID register) follow NetBSD/Amiberry and are untested on Amix. In the static driver they are
   never auto-detected: select one with `ide_board_force` (2 = A1200, 3 = A600), which is the only time
@@ -158,9 +158,13 @@ make -C module k30      # one line (or k46)
 make -C module static   # the static objects compiled against the kits, and their sha256
 make -C module clean
 make -C module DIAG=1   # a diagnostic build (-DIDE_DIAG), never for shipping
+make -C module PROBE=1  # a measurement build (-DIDE_PROBE), never for shipping
 ```
 
-It is built with amix-dlm's ABI kits, **kabi 1.2 on both lines** (`k30.1.2`, `k46.1.2`): `DLM=` names
+The module is tagged **kabi 1.2 on both lines** (`k30.1.2`, `k46.1.2`), so it loads on every
+kernel with the module core. From 1.1.0-6 it is built with the kits that carry `sys/sdseg.h`
+(`k30.1.6`, `k46.1.7` or later: the C4-7 limits, below); its one name from them, `sd_limits`, is a
+weak reference and does not raise the tag. `DLM=` names
 the amix-dlm directory with built kits, `kernel/dlm` of an [amigaux/amix](https://github.com/amigaux/amix)
 checkout after `make kit` there (default `../amix/kernel/dlm`, or the older standalone `../amix-dlm`
 where only that exists), or `KIT_k30=` / `KIT_k46=` name the kits.
@@ -171,7 +175,7 @@ holds no `0xDE1000`.
 | | |
 |---|---|
 | `.moddata` | `name=gayle`, `class=root`, `match=mobo:gayle`, `rank=ide`, `unload=never`, no `majors` (sd owns the disk majors); `cpu` and `kabi` from the kit |
-| Parameters | `intr` (1: interrupts after a self-test, the default; 0: polled), `slave` (0/1/2 as `ide_slave_enable`), `debug` (0–2), `master` (6) and `slaveunit` (5), the SCSI unit numbers, `board` (0: the ROM decides, the default; 1: the A4000 row; 2: the A1200 row; -1: never probe) |
+| Parameters | `intr` (1: interrupts after a self-test, the default; 0: polled), `slave` (0/1/2 as `ide_slave_enable`), `debug` (0–2), `master` (6) and `slaveunit` (5), the SCSI unit numbers, `board` (0: the ROM decides, the default; 1: the A4000 row; 2: the A1200 row; -1: never probe), `limits` (1: declare the C4-7 limits, the default; 0: declare none) |
 | Load | VPOSR AGA gate; then, with `board=0`, a walk of the Kickstart ROM's resident tags (`0xF80000`–`0xFFFFFF` only): `card.resource` resident means an A1200 (every A600/A1200 ROM has it, no A3000/A4000/A4000T ROM does), else the A4000. Then `bprobe` of that row's alternate status register (`0xDD303A` or `0xDA101A`), the task-file write/readback (parameter registers only, no command); polled IDENTIFY; `sd_register(idequeue, 0, 0xDD2020, "A4000 IDE", 4)` or `sd_register(idequeue, 0, 0xDA0000, "A1200 IDE", 4)`. No drive, or no Gayle: `ENXIO`, silently, and no card is taken. The A1200 path never touches `0xDD0000`–`0xDDFFFF`, the A4000 path never `0xDA0000`–`0xDAFFFF` |
 | Interrupts | by default (`intr=1`), at the first `sysinit`: `intr_attach` at level 2 and a self-test by one READ VERIFY SECTOR(S); polled if it fails or if no ATA drive is attached. On the A1200 the Gayle's latch (`0xDA9000` bit 7) is acknowledged and its IDE interrupt enable (`0xDAA000` bit 7) set before the command, and the test passes only if the latch reads clear after the handler's acknowledge; on failure the enable is cleared again. Until then, and with `intr=0`, every command is polled |
 | Halt | sets nIEN, and on the A1200 clears the Gayle's IDE interrupt enable; no flush |
@@ -186,6 +190,52 @@ polled, put the line `param intr=0` in `/etc/conf/modreg.local.d/gayle`, then `k
 `kbootset commit`; removing the line goes back to interrupts. The counters (`ide_resets`,
 `ide_intr_*`, `ideunits`, …; `ide_spins_hw` in a diagnostic build) are global symbols of the module,
 so `getksym` finds them at the module's load address.
+
+### Larger commands and the sector loop (1.1.0-6)
+
+- **C4-7 limits.** After `sd_register` the module declares the port's limits (kernel/dlm contract
+  C4-7, `sd_limits`): one segment of up to 64 KiB a command (128 sectors, one READ/WRITE
+  SECTOR(S)), 16-byte aligned, whole sectors, `SDL_ALLRAM` with reach `0xFFFFFFFF`, since the CPU
+  moves the data. Those commands come in as `struct sdcomx` through `idequeuex`, run on the same
+  path, and get `sx_resid` (0, or `nbyte` when the command failed or ended in CHECK CONDITION); a
+  segment list (`SDX_SEG`) is refused. The reference is weak: on a kernel before the segment minor
+  the call gives `ENOSYS` and nothing changes. `param limits=0` declares nothing. `ide_lim_rc` is
+  `sd_limits`' answer (-1 not called, 0 accepted), `ide_xcmds` / `ide_xrefused` count the extended
+  commands, `ide_xn` those in flight.
+- **The sector loop.** A whole sector moves through the DATA register in a loop with the port's
+  address in a register and eight word moves an iteration, with no byte-count test per word: two
+  instructions a word instead of eight. A partial last sector keeps the old loop.
+
+The static driver and `buddha` are unchanged by both (their objects keep their bytes).
+
+**Measured in emulation** (Amiberry `ide=a4000`, the scratch disk on the Gayle master beside a Z3660
+root; 16 MiB raw cells, a 32 MiB ufs file; kB/s, emulator times are relative only). 1.1.0-5 is the
+module the 1.1 packages ship (`gayle-k30` / `gayle-k46` 1.1.0-9):
+
+| Cell | k30 -79: 1.1.0-5 | 1.1.0-6, `limits=0` | 1.1.0-6 | k46 -69: 1.1.0-5 | 1.1.0-6 |
+|---|---:|---:|---:|---:|---:|
+| raw write 2 KiB | 2039 | 2470 | 2587 | 2428 | 2584 |
+| raw read 2 KiB | 2598 | 2874 | 2926 | 2683 | 3044 |
+| raw write 64 KiB | 2328 | 2883 | 3053 | 2817 | 2835 |
+| raw read 64 KiB | 2922 | 3299 | 3474 | 3213 | 3379 |
+| ufs write / read | 2146 / 1557 | 2498 / 1647 | 2324 / 1617 | 2545 / 1792 | 2880 / 1828 |
+
+- On the k30 kernel -79 the limits are accepted and dd's bounce form sends 64 KiB commands
+  (`ide_xcmds` equal to dd's own count, no fallback); on k46 -69 they are accepted, but dd still
+  sends 2 or 4 KiB commands, so only the sector loop counts there.
+- Every cell verified clean (badreqs 0), the copied tree compared the same (278 files), fsck clean,
+  no timeouts or resets.
+- In the emulator the drive's own time dominates: about 105 µs a sector, the same whether the
+  driver waits for the interrupt or spins (the measurement build's split), so the sector loop and
+  the command count show only partly. The 68030 there runs at the emulator's fastest setting, not
+  25 MHz.
+
+The measurement build (`make -C module PROBE=1`, `-DIDE_PROBE`, never shipped) splits the driver's
+time: every moment is charged to *above the driver*, *queue*, *PIO*, *polled waits*, *handler*,
+*waiting for the interrupt* or *completion*, counted in colour clocks of the beam counter
+(`modadmin -p ide_probe:38`, layout in `src/ide.c`). Its `ide_pmode` switches variants for A/B cells
+in one boot: bit 0 the sector loop, bit 1 a short look for the next sector before returning from the
+interrupt, bit 2 polled commands with interrupts on.
 
 **Tested** in emulation (amiberry `ide=a4000`), on the 68060 module kernel kern46m and the 68030 one
 kern30m; host harness `ide_modtest`, 239 checks per line. Module 1.1.0-3 (interrupt I/O by default) on

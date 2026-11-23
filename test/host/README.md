@@ -113,3 +113,16 @@ bracket is balanced) and a `printf()` that records the driver's console output.
   complete with their data, polled from then on, one console line) against a hang after one
   sector's interrupt (`hang_after`, CHECK CONDITION as before); and no access outside the allowed
   registers in any case (the mock's own counting checked first).
+- The C4-7 limits (`test_limits` in `ide_modtest.c`, against a mock `sd_limits`): declared once,
+  after `sd_register`, naming (`idequeue`, 0), version 1, `SDL_ALLRAM`, one segment of 64 KiB,
+  16-aligned, whole sectors, reach `0xFFFFFFFF`; `ENOSYS` kept in `ide_lim_rc` and the load goes on;
+  `limits=0` declares nothing; 64 KiB READ and WRITE as `sdcomx` commands through `sl_queue`, polled
+  and interrupt driven, one ATA command each, the data read back equal, `sx_resid` 0; a segment list
+  refused with `sx_resid` `nbyte` and no ATA command; CHECK CONDITION gives `sx_resid` `nbyte`; an
+  `sdcomx` across a page not counted as a page crossing (the same buffer as a stock command is); a
+  command handed in twice while queued completes once and is noted once; more commands in turn
+  than the table holds, none refused, none left noted. The checks were mutation-checked.
+- The measurement build (`-DIDE_PROBE`, `ide_modtest_probe` and `ide_modtest_probe_040`): every
+  module case with `ide_pmode` 0, then the data cases again with each variant on (the sector loop,
+  the look for the next sector, both, polled with interrupts on); the probe's magic and command
+  counts, and the look finding sectors without an interrupt.
